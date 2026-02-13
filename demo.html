@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>招标信息监控系统 - 演示版</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            color: #667eea;
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .controls {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: flex-end;
+        }
+
+        .form-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .stat-label {
+            color: #999;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .stat-value {
+            color: #333;
+            font-size: 36px;
+            font-weight: bold;
+        }
+
+        .results {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .results-header {
+            padding: 20px 25px;
+            background: #f8f9fa;
+            border-bottom: 2px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .results-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .results-count {
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .tender-list {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .tender-item {
+            padding: 20px 25px;
+            border-bottom: 1px solid #f0f0f0;
+            transition: background 0.2s;
+        }
+
+        .tender-item:hover {
+            background: #f8f9fa;
+        }
+
+        .tender-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+
+        .tender-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-bottom: 10px;
+        }
+
+        .meta-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .meta-label {
+            font-weight: 600;
+        }
+
+        .tender-link {
+            display: inline-block;
+            color: #667eea;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        .tender-link:hover {
+            text-decoration: underline;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .badge-primary {
+            background: #e0e7ff;
+            color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <div class="header">
+            <h1>🎯 招标信息监控系统</h1>
+            <p class="subtitle">基于 Go + Rod 的极简招标信息采集系统 - 演示版</p>
+        </div>
+
+        <!-- 控制面板 -->
+        <div class="controls">
+            <div class="form-group">
+                <label for="province">省份</label>
+                <select id="province">
+                    <option value="">全部省份</option>
+                    <option value="shandong">山东省</option>
+                    <option value="beijing">北京市</option>
+                    <option value="shanghai">上海市</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="keyword">关键词</label>
+                <input type="text" id="keyword" placeholder="输入关键词搜索" value="软件">
+            </div>
+
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button class="btn btn-primary" onclick="filterTenders()">🔍 查询</button>
+            </div>
+        </div>
+
+        <!-- 统计卡片 -->
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">总项目数</div>
+                <div class="stat-value" id="totalCount">15</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">今日新增</div>
+                <div class="stat-value" id="todayCount">3</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">监控省份</div>
+                <div class="stat-value" id="provinceCount">3</div>
+            </div>
+        </div>
+
+        <!-- 结果列表 -->
+        <div class="results">
+            <div class="results-header">
+                <span class="results-title">📋 招标项目列表</span>
+                <span class="results-count" id="resultCount">共 15 条</span>
+            </div>
+            <div class="tender-list" id="tenderList">
+                <!-- 示例数据 -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 模拟数据
+        const mockData = [
+            {
+                province: "山东省",
+                title: "济南市政府办公厅软件开发及运维服务采购项目",
+                amount: "150万元",
+                date: "2026-02-13",
+                contact: "张三",
+                phone: "0531-12345678",
+                url: "http://www.ccgp-shandong.gov.cn/detail/123456"
+            },
+            {
+                province: "山东省",
+                title: "青岛市教育局信息化建设项目",
+                amount: "280万元",
+                date: "2026-02-12",
+                contact: "李四",
+                phone: "0532-87654321",
+                url: "http://www.ccgp-shandong.gov.cn/detail/123457"
+            },
+            {
+                province: "北京市",
+                title: "北京市朝阳区政务系统集成服务采购",
+                amount: "500万元",
+                date: "2026-02-11",
+                contact: "王五",
+                phone: "010-12345678",
+                url: "http://www.ccgp-beijing.gov.cn/detail/789012"
+            },
+            {
+                province: "上海市",
+                title: "上海浦东新区智慧城市软件平台建设",
+                amount: "800万元",
+                date: "2026-02-10",
+                contact: "赵六",
+                phone: "021-87654321",
+                url: "http://www.ccgp-shanghai.gov.cn/detail/345678"
+            },
+            {
+                province: "山东省",
+                title: "烟台市卫生健康委员会医疗信息系统升级",
+                amount: "120万元",
+                date: "2026-02-09",
+                contact: "孙七",
+                phone: "0535-23456789",
+                url: "http://www.ccgp-shandong.gov.cn/detail/123458"
+            },
+            {
+                province: "北京市",
+                title: "海淀区政府采购中心软件开发服务",
+                amount: "320万元",
+                date: "2026-02-08",
+                contact: "周八",
+                phone: "010-98765432",
+                url: "http://www.ccgp-beijing.gov.cn/detail/789013"
+            },
+            {
+                province: "上海市",
+                title: "徐汇区财政局信息化系统运维项目",
+                amount: "180万元",
+                date: "2026-02-07",
+                contact: "吴九",
+                phone: "021-23456789",
+                url: "http://www.ccgp-shanghai.gov.cn/detail/345679"
+            },
+            {
+                province: "山东省",
+                title: "潍坊市公安局智慧警务平台软件采购",
+                amount: "450万元",
+                date: "2026-02-06",
+                contact: "郑十",
+                phone: "0536-34567890",
+                url: "http://www.ccgp-shandong.gov.cn/detail/123459"
+            },
+            {
+                province: "北京市",
+                title: "西城区应急管理局信息系统建设",
+                amount: "260万元",
+                date: "2026-02-05",
+                contact: "冯十一",
+                phone: "010-45678901",
+                url: "http://www.ccgp-beijing.gov.cn/detail/789014"
+            },
+            {
+                province: "上海市",
+                title: "静安区市场监管局智能监管平台开发",
+                amount: "380万元",
+                date: "2026-02-04",
+                contact: "陈十二",
+                phone: "021-56789012",
+                url: "http://www.ccgp-shanghai.gov.cn/detail/345680"
+            },
+            {
+                province: "山东省",
+                title: "威海市民政局养老服务信息化平台",
+                amount: "95万元",
+                date: "2026-02-03",
+                contact: "褚十三",
+                phone: "0631-67890123",
+                url: "http://www.ccgp-shandong.gov.cn/detail/123460"
+            },
+            {
+                province: "北京市",
+                title: "丰台区政务服务中心系统升级改造",
+                amount: "220万元",
+                date: "2026-02-02",
+                contact: "卫十四",
+                phone: "010-78901234",
+                url: "http://www.ccgp-beijing.gov.cn/detail/789015"
+            },
+            {
+                province: "上海市",
+                title: "闵行区教育局智慧校园软件采购",
+                amount: "420万元",
+                date: "2026-02-01",
+                contact: "蒋十五",
+                phone: "021-89012345",
+                url: "http://www.ccgp-shanghai.gov.cn/detail/345681"
+            },
+            {
+                province: "山东省",
+                title: "临沂市交通运输局智能交通管理系统",
+                amount: "580万元",
+                date: "2026-01-31",
+                contact: "沈十六",
+                phone: "0539-90123456",
+                url: "http://www.ccgp-shandong.gov.cn/detail/123461"
+            },
+            {
+                province: "北京市",
+                title: "石景山区文化和旅游局数字文旅平台",
+                amount: "340万元",
+                date: "2026-01-30",
+                contact: "韩十七",
+                phone: "010-01234567",
+                url: "http://www.ccgp-beijing.gov.cn/detail/789016"
+            }
+        ];
+
+        let currentData = mockData;
+
+        // 初始化显示
+        function displayTenders(data) {
+            const listEl = document.getElementById('tenderList');
+            const countEl = document.getElementById('resultCount');
+
+            countEl.textContent = `共 ${data.length} 条`;
+            document.getElementById('totalCount').textContent = data.length;
+
+            listEl.innerHTML = data.map(tender => `
+                <div class="tender-item">
+                    <div class="tender-title">${tender.title}</div>
+                    <div class="tender-meta">
+                        <div class="meta-item">
+                            <span class="meta-label">省份：</span>
+                            <span class="badge badge-primary">${tender.province}</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">预算：</span>
+                            <span>${tender.amount}</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">发布日期：</span>
+                            <span>${tender.date}</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">联系人：</span>
+                            <span>${tender.contact}</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">电话：</span>
+                            <span>${tender.phone}</span>
+                        </div>
+                    </div>
+                    <a href="${tender.url}" target="_blank" class="tender-link">查看详情 →</a>
+                </div>
+            `).join('');
+        }
+
+        // 筛选功能
+        function filterTenders() {
+            const province = document.getElementById('province').value;
+            const keyword = document.getElementById('keyword').value.toLowerCase();
+
+            let filtered = mockData;
+
+            if (province) {
+                filtered = filtered.filter(t => t.province === province);
+            }
+
+            if (keyword) {
+                filtered = filtered.filter(t => t.title.toLowerCase().includes(keyword));
+            }
+
+            displayTenders(filtered);
+        }
+
+        // 初始化
+        displayTenders(mockData);
+    </script>
+</body>
+</html>

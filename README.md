@@ -2,6 +2,10 @@
 
 基于 **Go + Rod** 的极简政府招标信息自动采集系统。
 
+## 🚀 一键部署到 Vercel
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/youyouhe/tender-monitor-demo)
+
 ## 🎯 项目特点
 
 - ✅ **极简架构** - 单文件Go程序 + SQLite数据库

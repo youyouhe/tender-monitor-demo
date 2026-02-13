@@ -1,0 +1,26 @@
+{
+  "name": "山东省政府采购网-详情",
+  "type": "detail",
+  "url": "{{.URL}}",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "{{.URL}}"
+    },
+    {
+      "action": "wait",
+      "wait_time": 2000
+    },
+    {
+      "action": "extract",
+      "type": "detail",
+      "fields": {
+        "amount": "td:contains('预算金额') + td",
+        "contact": "td:contains('联系人') + td",
+        "phone": "td:contains('联系电话') + td",
+        "buyer": "td:contains('采购人') + td",
+        "agency": "td:contains('代理机构') + td"
+      }
+    }
+  ]
+}

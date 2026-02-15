@@ -128,7 +128,7 @@ start_service() {
     export QWEN_MODEL="Qwen/Qwen2-VL-2B-Instruct"
     
     # 启动服务
-    nohup python qwen_captcha_service.py > logs/qwen_captcha.log 2>&1 &
+    nohup uvicorn app:app --host 0.0.0.0 --port 5000 > logs/qwen_captcha.log 2>&1 &
     echo $! > $SERVICE_NAME.pid
     
     sleep 3

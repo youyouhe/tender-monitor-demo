@@ -8,7 +8,7 @@ echo "================================"
 # 启动验证码服务（后台）
 echo "📦 启动验证码识别服务..."
 cd /app/captcha-service
-python3 captcha_service.py &
+uvicorn app:app --host 0.0.0.0 --port 5000 &
 CAPTCHA_PID=$!
 
 # 等待验证码服务启动

@@ -114,7 +114,7 @@ start_captcha_service() {
         # 直接用 Python 启动
         echo "使用 Python 直接启动..."
         source venv/bin/activate 2>/dev/null || true
-        nohup python captcha_service.py > ../logs/captcha.log 2>&1 &
+        nohup uvicorn app:app --host 0.0.0.0 --port 5000 > ../logs/captcha.log 2>&1 &
         echo $! > ../logs/captcha.pid
     fi
 

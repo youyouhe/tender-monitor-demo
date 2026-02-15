@@ -16,7 +16,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed static/*
@@ -51,6 +51,7 @@ type TraceStep struct {
 	Action         string            `json:"action"` // navigate, click, input, captcha, extract, wait
 	URL            string            `json:"url,omitempty"`
 	Selector       string            `json:"selector,omitempty"`
+	XPath          string            `json:"xpath,omitempty"` // 支持 XPath
 	Value          string            `json:"value,omitempty"`
 	ImageSelector  string            `json:"image_selector,omitempty"`
 	InputSelector  string            `json:"input_selector,omitempty"`
@@ -110,16 +111,24 @@ func (cs *CaptchaSolver) Solve(imageBytes []byte) (string, error) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	bodyStr := strings.TrimSpace(string(body))
+
+	// 尝试解析 JSON 响应
 	var result CaptchaResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("解析响应失败: %v", err)
+	if err := json.Unmarshal(body, &result); err == nil {
+		if !result.Success {
+			return "", fmt.Errorf("识别失败: %s", result.Error)
+		}
+		return result.Text, nil
 	}
 
-	if !result.Success {
-		return "", fmt.Errorf("识别失败: %s", result.Error)
+	// 如果不是 JSON，直接返回文本（兼容旧的验证码服务）
+	if len(bodyStr) > 0 {
+		log.Printf("验证码服务返回纯文本: %s", bodyStr)
+		return bodyStr, nil
 	}
 
-	return result.Text, nil
+	return "", fmt.Errorf("验证码服务返回空响应")
 }
 
 // CheckAvailable 检查服务是否可用
@@ -143,7 +152,7 @@ func initDB() error {
 		return fmt.Errorf("创建数据目录失败: %v", err)
 	}
 
-	db, err = sql.Open("sqlite3", dbPath)
+	db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		return fmt.Errorf("打开数据库失败: %v", err)
 	}
@@ -323,10 +332,7 @@ func executeTrace(browser *rod.Browser, trace *TraceFile, params map[string]stri
 func handleCaptcha(page *rod.Page, imageSelector string, solver *CaptchaSolver) (string, error) {
 	// 截取验证码图片
 	imgElem := page.MustElement(imageSelector)
-	imgBytes, err := imgElem.Screenshot(nil, nil)
-	if err != nil {
-		return "", fmt.Errorf("截图失败: %v", err)
-	}
+	imgBytes := imgElem.MustScreenshot()
 
 	// 保存图片用于调试
 	timestamp := time.Now().Format("20060102_150405")
@@ -361,7 +367,23 @@ func extractList(page *rod.Page, step TraceStep) []map[string]string {
 	// 等待列表加载
 	time.Sleep(2 * time.Second)
 
-	rows := page.MustElements(step.Selector)
+	var rows []*rod.Element
+	var err error
+
+	// 优先使用 XPath（如果指定）
+	if step.XPath != "" {
+		log.Printf("使用 XPath 提取: %s", step.XPath)
+		rows, err = page.ElementsX(step.XPath)
+	} else {
+		log.Printf("使用 CSS 选择器提取: %s", step.Selector)
+		rows, err = page.Elements(step.Selector)
+	}
+
+	if err != nil {
+		log.Printf("提取失败: %v", err)
+		return results
+	}
+
 	log.Printf("找到 %d 条记录", len(rows))
 
 	for _, row := range rows {
@@ -369,7 +391,10 @@ func extractList(page *rod.Page, step TraceStep) []map[string]string {
 		for field, selector := range step.Fields {
 			elem := row.MustElement(selector)
 			if field == "url" {
-				item[field], _ = elem.Attribute("href")
+				href, _ := elem.Attribute("href")
+				if href != nil {
+					item[field] = *href
+				}
 			} else {
 				item[field] = elem.MustText()
 			}
@@ -593,9 +618,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 // ==================== 主函数 ====================
 
 func main() {
-	log.Println("="*60)
+	log.Println(strings.Repeat("=", 60))
 	log.Println("🚀 招标信息监控系统")
-	log.Println("="*60)
+	log.Println(strings.Repeat("=", 60))
 
 	// 初始化数据库
 	if err := initDB(); err != nil {

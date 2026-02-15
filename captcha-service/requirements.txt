@@ -1,0 +1,6 @@
+flask==3.0.0
+flask-cors==4.0.0
+ddddocr==1.4.11
+pillow==10.2.0
+numpy==1.26.3
+onnxruntime==1.16.3

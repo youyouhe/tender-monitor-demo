@@ -1,8 +1,11 @@
-module my-test
+module tender-monitor
 
-go 1.25.0
+go 1.21
 
-require github.com/go-rod/rod v0.116.2
+require (
+	github.com/go-rod/rod v0.116.2
+	github.com/mattn/go-sqlite3 v1.14.18
+)
 
 require (
 	github.com/ysmood/fetchup v0.2.3 // indirect

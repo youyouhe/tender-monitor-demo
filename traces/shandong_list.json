@@ -1,0 +1,51 @@
+{
+  "name": "山东省政府采购网-列表",
+  "type": "list",
+  "url": "http://www.ccgp-shandong.gov.cn/home",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "http://www.ccgp-shandong.gov.cn/home"
+    },
+    {
+      "action": "wait",
+      "wait_time": 2000
+    },
+    {
+      "action": "click",
+      "selector": "text/采购公告"
+    },
+    {
+      "action": "wait",
+      "wait_time": 1000
+    },
+    {
+      "action": "input",
+      "selector": "input[placeholder*='公告标题']",
+      "value": "{{.Keyword}}"
+    },
+    {
+      "action": "captcha",
+      "image_selector": "img[src*='captcha']",
+      "input_selector": "input[placeholder*='验证码']"
+    },
+    {
+      "action": "click",
+      "selector": "button:has(span:text('查询'))"
+    },
+    {
+      "action": "wait",
+      "wait_time": 3000
+    },
+    {
+      "action": "extract",
+      "type": "list",
+      "selector": "tbody tr",
+      "fields": {
+        "title": "td:nth-child(3) span",
+        "date": "td:nth-child(4)",
+        "url": "td:nth-child(3) a"
+      }
+    }
+  ]
+}

@@ -43,14 +43,13 @@ temp/
 
 # Data directories
 data/
-traces/
+*.db
 logs/
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
 .Python
 venv/
 env/
@@ -58,6 +57,13 @@ env/
 
 # Hugging Face cache
 .cache/
+
+# Go
+go.work
+
+# Environment
+.env
+*.pid
 
 # Chinese directories (temporary test data)
 中央政府/

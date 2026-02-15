@@ -1,0 +1,221 @@
+#!/bin/bash
+
+# 山东省政府采购网招标信息采集 Skill v2.0
+# 增强版：支持验证码自动识别
+
+set -e
+
+KEYWORD="${1:-软件}"
+OUTPUT_FILE="/tmp/shandong-tender-$(date +%s).json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "🔍 开始采集山东省政府采购网招标信息..."
+echo "📝 搜索关键词: $KEYWORD"
+echo "🤖 版本: v2.0（支持验证码识别）"
+echo ""
+
+# 检查 ddddocr
+check_ddddocr() {
+    python3 -c "import ddddocr" 2>/dev/null && echo "✅ ddddocr 可用" || echo "⚠️  ddddocr 未安装（将使用手动输入）"
+}
+
+# 识别验证码
+recognize_captcha() {
+    local image_path="$1"
+
+    if [ ! -f "$image_path" ]; then
+        echo "❌ 验证码图片不存在: $image_path"
+        return 1
+    fi
+
+    # 尝试自动识别
+    if python3 -c "import ddddocr" 2>/dev/null; then
+        echo "🤖 使用 ddddocr 识别验证码..."
+        local result=$(python3 "$SCRIPT_DIR/captcha_ocr.py" "$image_path" 2>/dev/null)
+
+        if [ $? -eq 0 ] && [ -n "$result" ]; then
+            echo "✅ 识别成功: $result"
+            echo "$result"
+            return 0
+        else
+            echo "❌ 自动识别失败"
+            return 1
+        fi
+    else
+        echo "⚠️  ddddocr 未安装"
+        return 1
+    fi
+}
+
+# 主流程
+main() {
+    echo "📋 环境检查..."
+    check_ddddocr
+    echo ""
+
+    # 1. 打开网站
+    echo "📍 步骤 1/8: 访问山东省政府采购网..."
+    if ! agent-browser open "http://www.ccgp-shandong.gov.cn/" 2>&1 | grep -q "✓"; then
+        echo "⚠️  直接访问失败，尝试备用地址..."
+        agent-browser open "http://www.ccgp-shandong.gov.cn/home" 2>&1 | grep -v "^$" || true
+    fi
+    sleep 3
+
+    # 2. 等待页面加载
+    echo "⏳ 步骤 2/8: 等待页面加载..."
+    agent-browser wait 3000 || true
+
+    # 3. 获取页面快照
+    echo "📷 步骤 3/8: 分析页面结构..."
+    agent-browser snapshot -i > /tmp/homepage.txt 2>&1
+
+    # 4. 点击采购公告
+    echo "🔗 步骤 4/8: 进入采购公告页面..."
+
+    # 尝试多种方式点击
+    if agent-browser find text "采购公告" click 2>&1 | grep -q "✓"; then
+        echo "✅ 已点击: 采购公告"
+    elif agent-browser find text "招标公告" click 2>&1 | grep -q "✓"; then
+        echo "✅ 已点击: 招标公告"
+    elif agent-browser find text "公告" click 2>&1 | grep -q "✓"; then
+        echo "✅ 已点击: 公告"
+    else
+        echo "⚠️  未找到采购公告入口，继续尝试..."
+    fi
+
+    sleep 2
+    agent-browser snapshot -i > /tmp/search_page.txt 2>&1
+
+    # 5. 输入关键词
+    echo "⌨️  步骤 5/8: 输入搜索关键词..."
+
+    # 查找搜索框
+    SEARCH_REF=$(cat /tmp/search_page.txt | grep -iE "标题|关键词|搜索" | grep -i "textbox\|input" | head -1 | grep -oP '@e\d+' | head -1)
+
+    if [ -n "$SEARCH_REF" ]; then
+        echo "✅ 找到搜索框: $SEARCH_REF"
+        agent-browser fill "$SEARCH_REF" "$KEYWORD" 2>&1 | grep -v "^$" || true
+        sleep 1
+    else
+        echo "⚠️  未找到搜索框，尝试其他方法..."
+        # 尝试通过 label 查找
+        agent-browser find label "关键词" fill "$KEYWORD" 2>&1 | grep -v "^$" || true
+    fi
+
+    # 6. 处理验证码（关键升级！）
+    echo "🔐 步骤 6/8: 处理验证码..."
+
+    # 查找验证码图片
+    agent-browser snapshot -i > /tmp/with_keyword.txt 2>&1
+
+    HAS_CAPTCHA=$(cat /tmp/with_keyword.txt | grep -iE "验证码|captcha|code" | wc -l)
+
+    if [ "$HAS_CAPTCHA" -gt 0 ]; then
+        echo "🔍 检测到验证码字段"
+
+        # 截取整个页面（包含验证码）
+        CAPTCHA_IMG="/tmp/captcha_$(date +%s).png"
+        agent-browser screenshot "$CAPTCHA_IMG" 2>&1 | grep -v "^$" || true
+
+        if [ -f "$CAPTCHA_IMG" ]; then
+            echo "📸 验证码截图已保存: $CAPTCHA_IMG"
+
+            # 尝试自动识别
+            CAPTCHA_TEXT=$(recognize_captcha "$CAPTCHA_IMG")
+
+            if [ $? -eq 0 ] && [ -n "$CAPTCHA_TEXT" ]; then
+                echo "✅ 验证码识别成功: $CAPTCHA_TEXT"
+
+                # 查找验证码输入框
+                CAPTCHA_REF=$(cat /tmp/with_keyword.txt | grep -iE "验证码|captcha|code" | grep -i "textbox\|input" | head -1 | grep -oP '@e\d+' | head -1)
+
+                if [ -n "$CAPTCHA_REF" ]; then
+                    echo "⌨️  填入验证码: $CAPTCHA_REF"
+                    agent-browser fill "$CAPTCHA_REF" "$CAPTCHA_TEXT" 2>&1 | grep -v "^$" || true
+                    sleep 1
+                else
+                    echo "⚠️  未找到验证码输入框"
+                fi
+            else
+                echo "⚠️  自动识别失败，验证码图片已保存供查看"
+                echo "💡 可手动查看: $CAPTCHA_IMG"
+            fi
+        fi
+    else
+        echo "✅ 未检测到验证码，继续..."
+    fi
+
+    # 7. 点击查询
+    echo "🔘 步骤 7/8: 点击查询按钮..."
+
+    if agent-browser find text "查询" click 2>&1 | grep -q "✓"; then
+        echo "✅ 已点击: 查询"
+    elif agent-browser find text "搜索" click 2>&1 | grep -q "✓"; then
+        echo "✅ 已点击: 搜索"
+    elif agent-browser find role button click --name "查询" 2>&1 | grep -q "✓"; then
+        echo "✅ 已点击: 查询按钮"
+    else
+        echo "⚠️  未找到查询按钮"
+    fi
+
+    sleep 4
+
+    # 8. 提取结果
+    echo "📊 步骤 8/8: 提取搜索结果..."
+    agent-browser wait 2000 || true
+    agent-browser snapshot -i > /tmp/results_detailed.txt 2>&1
+
+    # 分析结果
+    echo ""
+    echo "================================"
+    echo "📋 采集结果"
+    echo "================================"
+    echo ""
+
+    # 提取可能的招标项目
+    RESULT_LINES=$(cat /tmp/results_detailed.txt | grep -iE "公告|采购|招标|项目" | head -20)
+    RESULT_COUNT=$(echo "$RESULT_LINES" | wc -l)
+
+    echo "✅ 找到 $RESULT_COUNT 条相关信息"
+    echo ""
+    echo "$RESULT_LINES" | head -10
+
+    echo ""
+    echo "================================"
+
+    # 保存 JSON
+    cat > "$OUTPUT_FILE" << EOF
+{
+  "version": "2.0",
+  "keyword": "$KEYWORD",
+  "source": "山东省政府采购网",
+  "url": "http://www.ccgp-shandong.gov.cn/",
+  "search_time": "$(date -Iseconds)",
+  "result_count": $RESULT_COUNT,
+  "captcha_recognition": "ddddocr",
+  "outputs": {
+    "homepage": "/tmp/homepage.txt",
+    "search_page": "/tmp/search_page.txt",
+    "results": "/tmp/results_detailed.txt",
+    "captcha_image": "$CAPTCHA_IMG"
+  }
+}
+EOF
+
+    echo ""
+    echo "💾 结果已保存:"
+    echo "   JSON: $OUTPUT_FILE"
+    echo "   详细快照: /tmp/results_detailed.txt"
+    if [ -f "$CAPTCHA_IMG" ]; then
+        echo "   验证码图片: $CAPTCHA_IMG"
+    fi
+
+    # 关闭浏览器
+    agent-browser close 2>&1 | grep -v "^$" || true
+
+    echo ""
+    echo "✅ 采集完成！"
+}
+
+# 执行主流程
+main

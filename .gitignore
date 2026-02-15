@@ -1,0 +1,64 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Screenshots and debug files
+*.png
+*.jpg
+*.jpeg
+*.html
+
+# CSV files
+*.csv
+
+# Recording files
+*.json
+
+# Log files
+*.log
+*.txt
+record*.txt
+
+# Editor directories
+.vscode/
+.idea/
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp files
+tmp/
+temp/
+
+# Data directories
+data/
+traces/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+
+# Hugging Face cache
+.cache/
+
+# Chinese directories (temporary test data)
+中央政府/
+广东/

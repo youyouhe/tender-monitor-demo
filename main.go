@@ -73,11 +73,19 @@ type CaptchaResponse struct {
 
 var (
 	db              *sql.DB
-	captchaService  = "http://localhost:5000"
-	dataDir         = "./data"
-	tracesDir       = "./traces"
-	browserHeadless = false // 改为 false 便于调试
+	captchaService  = getEnv("CAPTCHA_SERVICE", "http://localhost:5000")
+	dataDir         = getEnv("DATA_DIR", "./data")
+	tracesDir       = getEnv("TRACES_DIR", "./traces")
+	browserHeadless = getEnv("BROWSER_HEADLESS", "false") == "true"
 )
+
+// getEnv 获取环境变量，如果不存在则返回默认值
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
 
 // ==================== 验证码识别器 ====================
 

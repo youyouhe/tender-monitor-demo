@@ -1,13 +1,13 @@
 @echo off
 REM ============================================================
-REM 招标信息监控系统 - Windows 启动脚本
+REM Tender Monitor System - Windows Client Startup Script
 REM ============================================================
 
-REM ====== 配置区域 ======
-REM 请修改为你的验证码服务器地址
+REM ====== Configuration ======
+REM Please modify to your captcha server address
 set CAPTCHA_SERVICE=http://YOUR_SERVER_IP:5000
 
-REM 其他配置（通常不需要修改）
+REM Other settings (usually no need to change)
 set BROWSER_HEADLESS=false
 set DATA_DIR=./data
 set TRACES_DIR=./traces
@@ -16,52 +16,52 @@ REM =====================
 
 echo.
 echo ========================================
-echo   招标信息监控系统 - Windows 客户端
+echo   Tender Monitor - Windows Client
 echo ========================================
 echo.
-echo 配置信息:
-echo   验证码服务: %CAPTCHA_SERVICE%
-echo   浏览器模式: 有头模式 (可见窗口)
-echo   数据目录:   %DATA_DIR%
-echo   轨迹目录:   %TRACES_DIR%
+echo Configuration:
+echo   Captcha Service: %CAPTCHA_SERVICE%
+echo   Browser Mode:    Visible window
+echo   Data Directory:  %DATA_DIR%
+echo   Trace Directory: %TRACES_DIR%
 echo.
 echo ========================================
 echo.
 
-REM 检查 Go 是否安装
+REM Check if Go is installed
 go version >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未检测到 Go 环境，请先安装 Go 1.21+
-    echo 下载地址: https://go.dev/dl/
+    echo [ERROR] Go not found. Please install Go 1.21+
+    echo Download: https://go.dev/dl/
     pause
     exit /b 1
 )
 
-REM 检查验证码服务连通性
-echo [检查] 测试验证码服务连接...
+REM Test captcha service connectivity
+echo [CHECK] Testing captcha service connection...
 curl -s %CAPTCHA_SERVICE%/health >nul 2>&1
 if errorlevel 1 (
-    echo [警告] 无法连接到验证码服务: %CAPTCHA_SERVICE%
-    echo         请检查:
-    echo         1. 服务器地址是否正确
-    echo         2. 服务器端服务是否启动
-    echo         3. 防火墙是否开放 5000 端口
+    echo [WARNING] Cannot connect to captcha service: %CAPTCHA_SERVICE%
+    echo           Please check:
+    echo           1. Server address is correct
+    echo           2. Server service is running
+    echo           3. Firewall port 5000 is open
     echo.
-    echo 是否继续启动？程序会在需要验证码时降级到手动输入。
+    echo Continue anyway? The program will fall back to manual input.
     pause
 ) else (
-    echo [成功] 验证码服务连接正常
+    echo [SUCCESS] Captcha service connection OK
     echo.
 )
 
-REM 启动主程序
-echo [启动] 正在启动主程序...
+REM Start main program
+echo [STARTING] Launching main program...
 echo.
 go run main.go
 
-REM 如果程序异常退出
+REM If program exits abnormally
 echo.
 echo ========================================
-echo 程序已退出
+echo Program exited
 echo ========================================
 pause

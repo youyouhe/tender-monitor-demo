@@ -1,0 +1,26 @@
+{
+  "name": "广东省政府采购网-详情",
+  "type": "detail",
+  "url": "{{.URL}}",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "{{.URL}}"
+    },
+    {
+      "action": "wait",
+      "wait_time": 2000
+    },
+    {
+      "action": "extract",
+      "type": "detail",
+      "fields": {
+        "amount": "div.articleContent:contains('预算金额')",
+        "contact": "div.articleContent:contains('联系人')",
+        "phone": "div.articleContent:contains('联系电话')",
+        "buyer": "div.articleContent:contains('采购人')",
+        "agency": "div.articleContent:contains('代理机构')"
+      }
+    }
+  ]
+}

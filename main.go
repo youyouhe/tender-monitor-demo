@@ -249,10 +249,14 @@ func queryTenders(province, keyword string, limit int) ([]Tender, error) {
 func setupBrowser() (*rod.Browser, error) {
 	// 启动浏览器
 	var l *launcher.Launcher
+	// 使用自定义用户数据目录，避免权限问题
+	userDataDir := filepath.Join(dataDir, "browser-data")
+	os.MkdirAll(userDataDir, 0755)
+
 	if browserHeadless {
-		l = launcher.New().Headless(true)
+		l = launcher.New().Headless(true).UserDataDir(userDataDir)
 	} else {
-		l = launcher.New().Headless(false)
+		l = launcher.New().Headless(false).UserDataDir(userDataDir)
 	}
 
 	url := l.MustLaunch()

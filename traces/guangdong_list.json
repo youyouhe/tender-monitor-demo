@@ -1,0 +1,42 @@
+{
+  "name": "广东省政府采购网-列表",
+  "type": "list",
+  "url": "https://gdgpo.czt.gd.gov.cn/maincms-web/noticeInformationGd",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://gdgpo.czt.gd.gov.cn/maincms-web/noticeInformationGd"
+    },
+    {
+      "action": "wait",
+      "wait_time": 2000
+    },
+    {
+      "action": "input",
+      "selector": "div:nth-of-type(5) input",
+      "value": "{{.Keyword}}"
+    },
+    {
+      "action": "wait",
+      "wait_time": 1000
+    },
+    {
+      "action": "click",
+      "selector": "button.el-button--primary"
+    },
+    {
+      "action": "wait",
+      "wait_time": 3000
+    },
+    {
+      "action": "extract",
+      "type": "list",
+      "selector": "tbody tr",
+      "fields": {
+        "title": "td:nth-of-type(1) span",
+        "date": "td:nth-of-type(3)",
+        "url": "td:nth-of-type(1) span"
+      }
+    }
+  ]
+}

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Government procurement tender monitoring system (招标信息监控系统). A Go web server crawls provincial procurement websites using browser automation, extracts tender information, and stores it in SQLite. A companion Python Flask microservice handles CAPTCHA recognition via ddddocr OCR, with an optional Qwen2-VL intelligent recognition service.
+Government procurement tender monitoring system (招标信息监控系统). A Go web server crawls provincial procurement websites using browser automation, extracts tender information, and stores it in SQLite. A companion Python FastAPI microservice handles CAPTCHA recognition via ddddocr OCR, with an optional Qwen2-VL intelligent recognition service.
 
 ## Build & Run Commands
 
@@ -38,12 +38,14 @@ docker-compose up -d
 ```bash
 cd captcha-service
 python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt              # ddddocr engine
-pip install -r requirements_qwen.txt         # + Qwen2-VL engine (optional, needs GPU)
-uvicorn app:app --host 0.0.0.0 --port 5000  # or: python app.py
+pip install -r requirements.txt              # ddddocr engine (FastAPI, uvicorn, ddddocr)
+# For Qwen2-VL engine (optional, needs GPU), install additional dependencies:
+# pip install transformers torch pillow qwen-vl-utils
+uvicorn app:app --host 0.0.0.0 --port 5000
 
 # Test
-python3 test_captcha.py
+python3 test_captcha.py                      # ddddocr engine
+python3 test_qwen_captcha.py                 # Qwen2-VL engine (if installed)
 ```
 
 ### Verify Services
@@ -63,11 +65,11 @@ The system has three components that work together:
 - `cmd/collect/` - Shandong province dedicated collector with CSV export
 - `cmd/convert-trace/` - Chrome DevTools Recorder JSON → simplified trace format converter
 
-**Python Captcha Service (`captcha-service/app.py`)** - Unified FastAPI service with two switchable engines:
-- `ddddocr` (default) - lightweight OCR, no GPU needed
-- `qwen` - Qwen2-VL intelligent recognition, higher accuracy, needs GPU
+**Python Captcha Service (`captcha-service/app.py`)** - Unified FastAPI service with two switchable engines in a single app:
+- `ddddocr` (default) - lightweight OCR, no GPU needed, always available
+- `qwen` - Qwen2-VL intelligent recognition (90%+ accuracy), needs GPU and additional dependencies
 
-Switch engine per request via `?engine=qwen` query param or `{"engine": "qwen"}` in JSON body. Accepts images as raw binary (`Content-Type: image/*`), multipart form, or base64 JSON. The Go server calls `POST /ocr` on port 5000; if unavailable, falls back to manual input.
+Switch engine per request via `?engine=qwen` query param or `{"engine": "qwen"}` in JSON body. Accepts images as raw binary (`Content-Type: image/*`), multipart form, or base64 JSON. The Go server calls `POST /ocr` on port 5000; if unavailable, falls back to manual input. The Qwen engine requires additional packages (transformers, torch, qwen-vl-utils) and model download (~4GB).
 
 **Trace-Driven Crawler** - Province-specific automation is defined in JSON trace files under `traces/`. Each trace describes a sequence of browser actions (navigate, click, input, captcha, wait, extract). New provinces are added by recording a Chrome DevTools trace and converting it with `cmd/convert-trace/`.
 
@@ -97,9 +99,28 @@ SQLite at `./data/tenders.db`. Single `tenders` table with `url UNIQUE` constrai
 - **ddddocr** (Python) - CAPTCHA OCR engine using ONNX Runtime
 - **Qwen2-VL** (Python, optional) - Intelligent CAPTCHA recognition with higher accuracy
 
+## Testing
+
+```bash
+# Quick environment and trace file check
+./test_quick.sh
+
+# Test captcha service (ddddocr)
+cd captcha-service && python3 test_captcha.py
+
+# Test captcha service (Qwen2-VL, if installed)
+cd captcha-service && python3 test_qwen_captcha.py
+
+# Manual API testing
+curl http://localhost:8080/api/health
+curl "http://localhost:8080/api/tenders?province=shandong&keyword=软件"
+```
+
+Note: There are no Go unit tests (*_test.go files) in this project. Testing is primarily done through the test scripts and manual API calls.
+
 ## Configuration
 
-Global variables in `main.go` (lines 73-79), overridable via environment:
+Global variables in `main.go` (lines 74-79), overridable via environment:
 
 | Variable | Default | Env Var |
 |----------|---------|---------|

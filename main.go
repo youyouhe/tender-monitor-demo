@@ -400,18 +400,34 @@ func extractList(page *rod.Page, step TraceStep) []map[string]string {
 
 	for _, row := range rows {
 		item := make(map[string]string)
+		hasValidData := false
+
 		for field, selector := range step.Fields {
-			elem := row.MustElement(selector)
+			elem, err := row.Element(selector)
+			if err != nil || elem == nil {
+				log.Printf("警告: 字段 '%s' 选择器 '%s' 未找到元素，跳过", field, selector)
+				continue
+			}
+
 			if field == "url" {
 				href, _ := elem.Attribute("href")
-				if href != nil {
+				if href != nil && *href != "" {
 					item[field] = *href
+					hasValidData = true
 				}
 			} else {
-				item[field] = elem.MustText()
+				text := elem.MustText()
+				item[field] = text
+				if text != "" {
+					hasValidData = true
+				}
 			}
 		}
-		results = append(results, item)
+
+		// 只添加有有效数据的行
+		if hasValidData && item["url"] != "" {
+			results = append(results, item)
+		}
 	}
 
 	return results

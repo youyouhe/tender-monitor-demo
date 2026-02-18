@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -56,6 +59,22 @@ type TagDefinition struct {
 	SortOrder int    `json:"sort_order"`
 }
 
+// CollectTask 采集任务
+type CollectTask struct {
+	ID         string    `json:"id"`
+	SourceID   int       `json:"source_id"`
+	SourceName string    `json:"source_name"`
+	Keywords   string    `json:"keywords"` // JSON数组字符串
+	Status     string    `json:"status"`   // pending/running/completed/failed/cancelled
+	Progress   int       `json:"progress"` // 0-100
+	Found      int       `json:"found"`    // 发现的条数
+	Saved      int       `json:"saved"`    // 保存的条数
+	Message    string    `json:"message"`  // 状态消息或错误信息
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	CompletedAt string   `json:"completed_at,omitempty"`
+}
+
 // Tender 招标信息
 type Tender struct {
 	ID          int       `json:"id"`
@@ -80,14 +99,26 @@ type Tender struct {
 
 // TenderQueryParams 查询参数
 type TenderQueryParams struct {
-	SourceID int
-	Category string
-	Status   string
-	Keyword  string
-	DateFrom string
-	DateTo   string
-	Tags     string
-	Limit    int
+	SourceID  int
+	Category  string
+	Status    string
+	Keyword   string
+	MatchMode string // 关键词匹配模式: any/all/exact
+	DateFrom  string
+	DateTo    string
+	Tags      string
+	Limit     int // 每页记录数
+	Offset    int // 偏移量（跳过前N条）
+	Page      int // 页码（从1开始，用于计算Offset）
+}
+
+// TenderQueryResult 查询结果
+type TenderQueryResult struct {
+	Data       []Tender `json:"data"`
+	Total      int      `json:"total"`       // 总记录数
+	Page       int      `json:"page"`        // 当前页码
+	PageSize   int      `json:"page_size"`   // 每页记录数
+	TotalPages int      `json:"total_pages"` // 总页数
 }
 
 // TraceFile 标准轨迹格式
@@ -152,15 +183,50 @@ var (
 	tracesDir       = getEnv("TRACES_DIR", "./traces")
 	browserHeadless = getEnv("BROWSER_HEADLESS", "false") == "true"
 	db              *sql.DB
-)
 
-var supportedProvinces = []string{"guangdong", "shandong"}
+	// 任务取消管理器
+	taskCancelers = make(map[string]context.CancelFunc)
+	taskMutex     sync.RWMutex
+)
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
 	return defaultValue
+}
+
+// registerTaskCanceler 注册任务取消函数
+func registerTaskCanceler(taskID string, cancel context.CancelFunc) {
+	taskMutex.Lock()
+	defer taskMutex.Unlock()
+	taskCancelers[taskID] = cancel
+}
+
+// unregisterTaskCanceler 注销任务取消函数
+func unregisterTaskCanceler(taskID string) {
+	taskMutex.Lock()
+	defer taskMutex.Unlock()
+	delete(taskCancelers, taskID)
+}
+
+// cancelTask 取消指定任务
+func cancelTask(taskID string) error {
+	taskMutex.RLock()
+	cancel, exists := taskCancelers[taskID]
+	taskMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("任务不存在或已完成")
+	}
+
+	cancel()
+	updateCollectTask(taskID, map[string]interface{}{
+		"status":       "cancelled",
+		"message":      "用户手动取消",
+		"completed_at": time.Now().Format("2006-01-02 15:04:05"),
+	})
+	return nil
 }
 
 // ==================== 验证码识别器 ====================
@@ -265,6 +331,25 @@ func initDB() error {
 		sort_order INTEGER DEFAULT 0
 	)`)
 
+	db.Exec(`CREATE TABLE IF NOT EXISTS collect_tasks (
+		id TEXT PRIMARY KEY,
+		source_id INTEGER,
+		source_name TEXT,
+		keywords TEXT,
+		status TEXT DEFAULT 'pending',
+		progress INTEGER DEFAULT 0,
+		found INTEGER DEFAULT 0,
+		saved INTEGER DEFAULT 0,
+		message TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		completed_at TIMESTAMP,
+		FOREIGN KEY (source_id) REFERENCES sources(id)
+	)`)
+
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_status ON collect_tasks(status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_created ON collect_tasks(created_at)`)
+
 	db.Exec(`CREATE TABLE IF NOT EXISTS tenders (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		source_id INTEGER,
@@ -346,51 +431,223 @@ func initDefaultTags() {
 	}
 }
 
-func saveTender(tender *Tender) error {
-	query := `INSERT OR IGNORE INTO tenders (source_id, title, amount, publish_date, deadline, contact, phone, url, keywords, content, attachments, status, tags, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := db.Exec(query, tender.SourceID, tender.Title, tender.Amount, tender.PublishDate, tender.Deadline, tender.Contact, tender.Phone, tender.URL, tender.Keywords, tender.Content, tender.Attachments, tender.Status, tender.Tags, tender.Note)
-	return err
+// SaveTenderResult 保存招标信息的结果
+type SaveTenderResult struct {
+	IsNew   bool   // 是否是新记录
+	Updated bool   // 是否更新了已有记录
+	Action  string // "created" / "updated" / "skipped"
 }
 
-func queryTenders(params TenderQueryParams) ([]Tender, error) {
-	query := `SELECT id, source_id, title, amount, publish_date, deadline, contact, phone, url, keywords, content, attachments, status, tags, note, reviewed_at, reviewed_by, created_at FROM tenders WHERE 1=1`
+func saveTender(tender *Tender) (*SaveTenderResult, error) {
+	// 查询是否已存在
+	var existingID int
+	var existingAmount, existingDeadline, existingContact, existingPhone, existingContent, existingAttachments sql.NullString
+
+	err := db.QueryRow(`
+		SELECT id, amount, deadline, contact, phone, content, attachments
+		FROM tenders WHERE url = ?
+	`, tender.URL).Scan(&existingID, &existingAmount, &existingDeadline, &existingContact, &existingPhone, &existingContent, &existingAttachments)
+
+	if err == sql.ErrNoRows {
+		// 不存在，插入新记录
+		_, err = db.Exec(`
+			INSERT INTO tenders (source_id, title, amount, publish_date, deadline, contact, phone, url, keywords, content, attachments, status, tags, note)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, tender.SourceID, tender.Title, tender.Amount, tender.PublishDate, tender.Deadline, tender.Contact, tender.Phone, tender.URL, tender.Keywords, tender.Content, tender.Attachments, tender.Status, tender.Tags, tender.Note)
+
+		if err != nil {
+			return nil, fmt.Errorf("插入失败: %v", err)
+		}
+
+		return &SaveTenderResult{IsNew: true, Updated: false, Action: "created"}, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("查询失败: %v", err)
+	}
+
+	// 记录已存在，检查是否需要更新
+	needsUpdate := false
+
+	// 比较关键字段，如果新数据有值且与旧数据不同，则需要更新
+	if tender.Amount != "" && (!existingAmount.Valid || existingAmount.String != tender.Amount) {
+		needsUpdate = true
+	}
+	if tender.Deadline != "" && (!existingDeadline.Valid || existingDeadline.String != tender.Deadline) {
+		needsUpdate = true
+	}
+	if tender.Contact != "" && (!existingContact.Valid || existingContact.String != tender.Contact) {
+		needsUpdate = true
+	}
+	if tender.Phone != "" && (!existingPhone.Valid || existingPhone.String != tender.Phone) {
+		needsUpdate = true
+	}
+	if tender.Content != "" && (!existingContent.Valid || existingContent.String != tender.Content) {
+		needsUpdate = true
+	}
+	if tender.Attachments != "" && (!existingAttachments.Valid || existingAttachments.String != tender.Attachments) {
+		needsUpdate = true
+	}
+
+	if !needsUpdate {
+		// 数据没有变化，跳过
+		return &SaveTenderResult{IsNew: false, Updated: false, Action: "skipped"}, nil
+	}
+
+	// 更新记录（只更新有值的字段）
+	setClauses := []string{}
+	args := []interface{}{}
+
+	if tender.Amount != "" {
+		setClauses = append(setClauses, "amount = ?")
+		args = append(args, tender.Amount)
+	}
+	if tender.Deadline != "" {
+		setClauses = append(setClauses, "deadline = ?")
+		args = append(args, tender.Deadline)
+	}
+	if tender.Contact != "" {
+		setClauses = append(setClauses, "contact = ?")
+		args = append(args, tender.Contact)
+	}
+	if tender.Phone != "" {
+		setClauses = append(setClauses, "phone = ?")
+		args = append(args, tender.Phone)
+	}
+	if tender.Content != "" {
+		setClauses = append(setClauses, "content = ?")
+		args = append(args, tender.Content)
+	}
+	if tender.Attachments != "" {
+		setClauses = append(setClauses, "attachments = ?")
+		args = append(args, tender.Attachments)
+	}
+
+	// 始终更新关键词（追加模式）
+	if tender.Keywords != "" {
+		setClauses = append(setClauses, "keywords = ?")
+		// 如果已有关键词，追加新关键词（避免重复）
+		existingKeywords := ""
+		db.QueryRow("SELECT keywords FROM tenders WHERE id = ?", existingID).Scan(&existingKeywords)
+		if existingKeywords != "" && !strings.Contains(existingKeywords, tender.Keywords) {
+			args = append(args, existingKeywords+","+tender.Keywords)
+		} else {
+			args = append(args, tender.Keywords)
+		}
+	}
+
+	if len(setClauses) == 0 {
+		return &SaveTenderResult{IsNew: false, Updated: false, Action: "skipped"}, nil
+	}
+
+	args = append(args, existingID)
+	query := fmt.Sprintf("UPDATE tenders SET %s WHERE id = ?", strings.Join(setClauses, ", "))
+	_, err = db.Exec(query, args...)
+
+	if err != nil {
+		return nil, fmt.Errorf("更新失败: %v", err)
+	}
+
+	return &SaveTenderResult{IsNew: false, Updated: true, Action: "updated"}, nil
+}
+
+func queryTenders(params TenderQueryParams) (*TenderQueryResult, error) {
+	// 构建WHERE子句
+	whereClause := "WHERE 1=1"
 	args := []interface{}{}
 
 	if params.SourceID > 0 {
-		query += " AND source_id = ?"
+		whereClause += " AND source_id = ?"
 		args = append(args, params.SourceID)
 	}
 	if params.Category != "" {
-		query += " AND source_id IN (SELECT id FROM sources WHERE category = ?)"
+		whereClause += " AND source_id IN (SELECT id FROM sources WHERE category = ?)"
 		args = append(args, params.Category)
 	}
 	if params.Status != "" {
-		query += " AND status = ?"
+		whereClause += " AND status = ?"
 		args = append(args, params.Status)
 	}
 	if params.Keyword != "" {
-		query += " AND (title LIKE ? OR keywords LIKE ? OR content LIKE ?)"
-		args = append(args, "%"+params.Keyword+"%", "%"+params.Keyword+"%", "%"+params.Keyword+"%")
+		// 解析关键词（支持空格、逗号、分号分隔）
+		keywords := strings.FieldsFunc(params.Keyword, func(r rune) bool {
+			return r == ',' || r == '，' || r == ';' || r == '；' || r == ' '
+		})
+
+		if len(keywords) > 0 {
+			matchMode := KeywordMatchMode(params.MatchMode)
+			if matchMode == "" {
+				matchMode = MatchModeAny
+			}
+
+			switch matchMode {
+			case MatchModeAll:
+				// AND逻辑：所有关键词都必须匹配
+				for _, kw := range keywords {
+					whereClause += " AND (title LIKE ? OR keywords LIKE ? OR content LIKE ?)"
+					args = append(args, "%"+kw+"%", "%"+kw+"%", "%"+kw+"%")
+				}
+			case MatchModeExact:
+				// 精确匹配：标题完全等于关键词
+				placeholders := make([]string, len(keywords))
+				for i, kw := range keywords {
+					placeholders[i] = "?"
+					args = append(args, kw)
+				}
+				whereClause += fmt.Sprintf(" AND title IN (%s)", strings.Join(placeholders, ","))
+			default: // MatchModeAny
+				// OR逻辑：匹配任意一个关键词
+				conditions := []string{}
+				for _, kw := range keywords {
+					conditions = append(conditions, "(title LIKE ? OR keywords LIKE ? OR content LIKE ?)")
+					args = append(args, "%"+kw+"%", "%"+kw+"%", "%"+kw+"%")
+				}
+				whereClause += " AND (" + strings.Join(conditions, " OR ") + ")"
+			}
+		}
 	}
 	if params.DateFrom != "" {
-		query += " AND publish_date >= ?"
+		whereClause += " AND publish_date >= ?"
 		args = append(args, params.DateFrom)
 	}
 	if params.DateTo != "" {
-		query += " AND publish_date <= ?"
+		whereClause += " AND publish_date <= ?"
 		args = append(args, params.DateTo)
 	}
 
+	// 查询总记录数
+	countQuery := "SELECT COUNT(*) FROM tenders " + whereClause
+	var total int
+	err := db.QueryRow(countQuery, args...).Scan(&total)
+	if err != nil {
+		return nil, fmt.Errorf("查询总数失败: %v", err)
+	}
+
+	// 处理分页参数
 	limit := params.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = 20 // 默认每页20条
 	}
-	query += " ORDER BY publish_date DESC LIMIT ?"
-	args = append(args, limit)
+	if limit > 100 {
+		limit = 100 // 最大100条
+	}
 
-	rows, err := db.Query(query, args...)
+	// 如果提供了Page，则计算Offset
+	offset := params.Offset
+	page := params.Page
+	if page > 0 {
+		offset = (page - 1) * limit
+	} else if offset < 0 {
+		offset = 0
+	}
+
+	// 查询数据
+	dataQuery := `SELECT id, source_id, title, amount, publish_date, deadline, contact, phone, url, keywords, content, attachments, status, tags, note, reviewed_at, reviewed_by, created_at FROM tenders ` + whereClause + " ORDER BY publish_date DESC LIMIT ? OFFSET ?"
+	dataArgs := append(args, limit, offset)
+
+	rows, err := db.Query(dataQuery, dataArgs...)
 	if err != nil {
-		return []Tender{}, err
+		return nil, fmt.Errorf("查询数据失败: %v", err)
 	}
 	defer rows.Close()
 
@@ -428,7 +685,20 @@ func queryTenders(params TenderQueryParams) ([]Tender, error) {
 		}
 		tenders = append(tenders, t)
 	}
-	return tenders, nil
+
+	// 计算总页数
+	totalPages := (total + limit - 1) / limit
+	if page <= 0 {
+		page = 1
+	}
+
+	return &TenderQueryResult{
+		Data:       tenders,
+		Total:      total,
+		Page:       page,
+		PageSize:   limit,
+		TotalPages: totalPages,
+	}, nil
 }
 
 func getSourceIDByCode(code string) int {
@@ -453,6 +723,72 @@ func getSourcesMap() map[int]Source {
 	return sources
 }
 
+// exportTendersToCSV 导出招标数据为CSV格式
+func exportTendersToCSV(w http.ResponseWriter, params TenderQueryParams) error {
+	// 限制导出数量，防止内存溢出
+	maxExportLimit := 10000
+	if params.Limit <= 0 || params.Limit > maxExportLimit {
+		params.Limit = maxExportLimit
+	}
+	params.Offset = 0 // 导出时不使用分页偏移
+
+	result, err := queryTenders(params)
+	if err != nil {
+		return err
+	}
+
+	sources := getSourcesMap()
+	filename := fmt.Sprintf("tenders_export_%s.csv", time.Now().Format("20060102_150405"))
+
+	// 设置响应头
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
+
+	// 写入UTF-8 BOM，确保Excel正确识别中文
+	w.Write([]byte{0xEF, 0xBB, 0xBF})
+
+	writer := csv.NewWriter(w)
+	defer writer.Flush()
+
+	// 写入表头
+	headers := []string{
+		"ID", "采集源", "标题", "金额", "发布日期", "截止日期",
+		"联系人", "联系电话", "URL", "关键词", "状态", "标签", "备注",
+	}
+	if err := writer.Write(headers); err != nil {
+		return err
+	}
+
+	// 写入数据行
+	for _, t := range result.Data {
+		sourceName := "未知源"
+		if src, ok := sources[t.SourceID]; ok {
+			sourceName = src.Name
+		}
+
+		row := []string{
+			fmt.Sprintf("%d", t.ID),
+			sourceName,
+			t.Title,
+			t.Amount,
+			t.PublishDate,
+			t.Deadline,
+			t.Contact,
+			t.Phone,
+			t.URL,
+			t.Keywords,
+			t.Status,
+			t.Tags,
+			t.Note,
+		}
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func getAllSources() ([]Source, error) {
 	rows, err := db.Query("SELECT id, name, code, category, base_url, description, is_active, created_at FROM sources ORDER BY category, name")
 	if err != nil {
@@ -467,6 +803,121 @@ func getAllSources() ([]Source, error) {
 		}
 	}
 	return sources, nil
+}
+
+// ==================== 采集任务管理 ====================
+
+func createCollectTask(sourceID int, keywords []string) (*CollectTask, error) {
+	// 生成任务ID
+	taskID := fmt.Sprintf("task_%d_%d", sourceID, time.Now().Unix())
+
+	// 获取source名称
+	var sourceName string
+	db.QueryRow("SELECT name FROM sources WHERE id = ?", sourceID).Scan(&sourceName)
+
+	// 将关键词数组转为JSON字符串
+	keywordsJSON, _ := json.Marshal(keywords)
+
+	task := &CollectTask{
+		ID:         taskID,
+		SourceID:   sourceID,
+		SourceName: sourceName,
+		Keywords:   string(keywordsJSON),
+		Status:     "pending",
+		Progress:   0,
+		Found:      0,
+		Saved:      0,
+		Message:    "任务已创建，等待执行",
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+
+	_, err := db.Exec(`
+		INSERT INTO collect_tasks (id, source_id, source_name, keywords, status, progress, found, saved, message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, task.ID, task.SourceID, task.SourceName, task.Keywords, task.Status, task.Progress, task.Found, task.Saved, task.Message, task.CreatedAt, task.UpdatedAt)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return task, nil
+}
+
+func updateCollectTask(taskID string, updates map[string]interface{}) error {
+	setClauses := []string{"updated_at = ?"}
+	args := []interface{}{time.Now()}
+
+	allowedFields := map[string]bool{
+		"status": true, "progress": true, "found": true, "saved": true,
+		"message": true, "completed_at": true,
+	}
+
+	for key, value := range updates {
+		if allowedFields[key] {
+			setClauses = append(setClauses, fmt.Sprintf("%s = ?", key))
+			args = append(args, value)
+		}
+	}
+
+	args = append(args, taskID)
+	query := fmt.Sprintf("UPDATE collect_tasks SET %s WHERE id = ?", strings.Join(setClauses, ", "))
+	_, err := db.Exec(query, args...)
+	return err
+}
+
+func getCollectTask(taskID string) (*CollectTask, error) {
+	var task CollectTask
+	var completedAt sql.NullString
+
+	err := db.QueryRow(`
+		SELECT id, source_id, source_name, keywords, status, progress, found, saved, message, created_at, updated_at, completed_at
+		FROM collect_tasks WHERE id = ?
+	`, taskID).Scan(&task.ID, &task.SourceID, &task.SourceName, &task.Keywords, &task.Status,
+		&task.Progress, &task.Found, &task.Saved, &task.Message, &task.CreatedAt, &task.UpdatedAt, &completedAt)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if completedAt.Valid {
+		task.CompletedAt = completedAt.String
+	}
+
+	return &task, nil
+}
+
+func getAllCollectTasks(limit int) ([]CollectTask, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	rows, err := db.Query(`
+		SELECT id, source_id, source_name, keywords, status, progress, found, saved, message, created_at, updated_at, completed_at
+		FROM collect_tasks ORDER BY created_at DESC LIMIT ?
+	`, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := []CollectTask{}
+	for rows.Next() {
+		var task CollectTask
+		var completedAt sql.NullString
+
+		if err := rows.Scan(&task.ID, &task.SourceID, &task.SourceName, &task.Keywords, &task.Status,
+			&task.Progress, &task.Found, &task.Saved, &task.Message, &task.CreatedAt, &task.UpdatedAt, &completedAt); err == nil {
+
+			if completedAt.Valid {
+				task.CompletedAt = completedAt.String
+			}
+			tasks = append(tasks, task)
+		}
+	}
+
+	return tasks, nil
 }
 
 func saveSource(s *Source) error {
@@ -638,6 +1089,17 @@ func executeTrace(browser *rod.Browser, trace *TraceFile, params map[string]stri
 			if step.WaitForVisible != "" {
 				page.MustElement(step.WaitForVisible).MustWaitVisible()
 			}
+		case "captcha":
+			if step.ImageSelector == "" || step.InputSelector == "" {
+				return nil, fmt.Errorf("captcha action 缺少必要参数: image_selector 或 input_selector")
+			}
+			captchaText, err := handleCaptcha(page, step.ImageSelector, solver)
+			if err != nil {
+				return nil, fmt.Errorf("验证码处理失败: %v", err)
+			}
+			// 输入验证码
+			page.MustElement(step.InputSelector).MustSelectAllText().MustInput(captchaText)
+			log.Printf("✅ 验证码已输入")
 		case "extract":
 			if step.Type == "list" {
 				extractedData = extractList(page, step)
@@ -657,7 +1119,7 @@ func handleCaptcha(page *rod.Page, imageSelector string, solver *CaptchaSolver) 
 
 	timestamp := time.Now().Format("20060102_150405")
 	captchaPath := filepath.Join(dataDir, fmt.Sprintf("captcha_%s.png", timestamp))
-	os.WriteFile(captchaPath, imgBytes, 0644)
+	os.WriteFile(captchaPath, imgBytes, 0600) // 修复安全问题：文件权限改为0600
 	log.Printf("验证码已保存: %s", captchaPath)
 
 	if solver != nil && solver.CheckAvailable() {
@@ -667,13 +1129,12 @@ func handleCaptcha(page *rod.Page, imageSelector string, solver *CaptchaSolver) 
 			return text, nil
 		}
 		log.Printf("⚠️ 自动识别失败: %v", err)
+		return "", fmt.Errorf("验证码自动识别失败: %v (已保存至 %s)", err, captchaPath)
 	}
 
-	fmt.Printf("请查看验证码图片: %s\n", captchaPath)
-	fmt.Print("请输入验证码: ")
-	var manualInput string
-	fmt.Scanln(&manualInput)
-	return manualInput, nil
+	// 验证码服务不可用
+	log.Printf("❌ 验证码服务不可用，已保存验证码图片: %s", captchaPath)
+	return "", fmt.Errorf("验证码服务不可用，无法继续采集 (验证码已保存至 %s)", captchaPath)
 }
 
 func extractList(page *rod.Page, step TraceStep) []map[string]string {
@@ -809,23 +1270,118 @@ func replaceParams(template string, params map[string]string) string {
 
 // ==================== 采集任务 ====================
 
-func runCollectTask(sourceID int, keywords []string) error {
+// runCollectTaskWithTracking 带任务状态跟踪的采集任务执行器
+func runCollectTaskWithTracking(taskID string, sourceID int, keywords []string) {
+	// 创建可取消的context
+	ctx, cancel := context.WithCancel(context.Background())
+	registerTaskCanceler(taskID, cancel)
+	defer unregisterTaskCanceler(taskID)
+
+	// 更新状态为运行中
+	updateCollectTask(taskID, map[string]interface{}{
+		"status":  "running",
+		"message": "采集任务执行中",
+	})
+
+	// 执行采集
+	err := runCollectTask(ctx, taskID, sourceID, keywords)
+
+	// 更新完成状态
+	if err != nil {
+		// 如果是context取消，任务已在cancelTask中更新状态
+		if ctx.Err() == context.Canceled {
+			log.Printf("🚫 任务 %s 已取消", taskID)
+		} else {
+			updateCollectTask(taskID, map[string]interface{}{
+				"status":       "failed",
+				"message":      fmt.Sprintf("采集失败: %v", err),
+				"completed_at": time.Now().Format("2006-01-02 15:04:05"),
+			})
+			log.Printf("❌ 任务 %s 失败: %v", taskID, err)
+		}
+	} else {
+		updateCollectTask(taskID, map[string]interface{}{
+			"status":       "completed",
+			"progress":     100,
+			"message":      "采集完成",
+			"completed_at": time.Now().Format("2006-01-02 15:04:05"),
+		})
+		log.Printf("✅ 任务 %s 完成", taskID)
+	}
+}
+
+func runCollectTask(ctx context.Context, taskID string, sourceID int, keywords []string) error {
 	if sourceID > 0 {
-		if err := collectBySource(sourceID, keywords); err != nil {
+		// 采集指定的源
+		if err := collectBySourceWithProgress(ctx, taskID, sourceID, keywords); err != nil {
 			log.Printf("❌ 采集源 %d 采集失败: %v", sourceID, err)
+			return err
 		}
 		return nil
 	}
 
-	for _, p := range supportedProvinces {
-		if err := collectSingleProvince(p, keywords); err != nil {
-			log.Printf("❌ 省份 %s 采集失败: %v", p, err)
+	// sourceID=0时，采集所有活跃的源
+	log.Printf("🚀 开始批量采集所有活跃源...")
+	rows, err := db.Query("SELECT id, name, code FROM sources WHERE is_active = 1 ORDER BY id")
+	if err != nil {
+		return fmt.Errorf("查询采集源失败: %v", err)
+	}
+	defer rows.Close()
+
+	activeSources := []struct {
+		ID   int
+		Name string
+		Code string
+	}{}
+
+	for rows.Next() {
+		var s struct {
+			ID   int
+			Name string
+			Code string
+		}
+		if err := rows.Scan(&s.ID, &s.Name, &s.Code); err == nil {
+			activeSources = append(activeSources, s)
 		}
 	}
+
+	log.Printf("📋 找到 %d 个活跃采集源", len(activeSources))
+
+	// 遍历所有活跃源进行采集
+	successCount := 0
+	failCount := 0
+
+	for _, source := range activeSources {
+		// 检查是否被取消
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		log.Printf("\n========== 采集源: %s (%s) ==========", source.Name, source.Code)
+
+		// 检查是否有对应的轨迹
+		listTrace := getTraceBySourceAndType(source.ID, "list")
+		if listTrace == nil {
+			log.Printf("⚠️ 跳过 %s：未找到列表轨迹", source.Name)
+			continue
+		}
+
+		// 使用collectBySource（不带进度跟踪，因为是批量模式）
+		if err := collectBySource(source.ID, keywords); err != nil {
+			log.Printf("❌ 采集源 %s 采集失败: %v", source.Name, err)
+			failCount++
+		} else {
+			log.Printf("✅ 采集源 %s 完成", source.Name)
+			successCount++
+		}
+	}
+
+	log.Printf("\n📊 批量采集完成：成功 %d 个，失败 %d 个", successCount, failCount)
 	return nil
 }
 
-func collectBySource(sourceID int, keywords []string) error {
+// collectBySourceWithProgress 带进度跟踪的采集函数
+func collectBySourceWithProgress(ctx context.Context, taskID string, sourceID int, keywords []string) error {
 	var source Source
 	err := db.QueryRow("SELECT id, name, code, category, base_url FROM sources WHERE id = ?", sourceID).Scan(
 		&source.ID, &source.Name, &source.Code, &source.Category, &source.BaseURL,
@@ -835,6 +1391,10 @@ func collectBySource(sourceID int, keywords []string) error {
 	}
 
 	log.Printf("🚀 开始采集任务：采集源=%s, 关键词=%v", source.Name, keywords)
+	updateCollectTask(taskID, map[string]interface{}{
+		"progress": 10,
+		"message":  fmt.Sprintf("正在准备采集 %s", source.Name),
+	})
 
 	listTrace := getTraceBySourceAndType(sourceID, "list")
 	if listTrace == nil {
@@ -852,24 +1412,56 @@ func collectBySource(sourceID int, keywords []string) error {
 	}
 	defer browser.Close()
 
+	updateCollectTask(taskID, map[string]interface{}{
+		"progress": 20,
+		"message":  "浏览器已启动，开始采集列表",
+	})
+
 	solver := NewCaptchaSolver(captchaService)
 
-	for _, keyword := range keywords {
-		log.Printf("\n--- 关键词: %s ---", keyword)
+	// 创建关键词匹配器（性能优化：在循环外创建一次，循环内重用）
+	keywordMatcher := NewKeywordMatcher(keywords, MatchModeAny)
+
+	totalFound := 0
+	totalSaved := 0
+
+	for kwIdx, keyword := range keywords {
+		// 检查是否被取消
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		log.Printf("\n--- 关键词 [%d/%d]: %s ---", kwIdx+1, len(keywords), keyword)
+
+		// 更新进度：20 + (kwIdx / len(keywords)) * 70
+		progress := 20 + (kwIdx*70)/len(keywords)
+		updateCollectTask(taskID, map[string]interface{}{
+			"progress": progress,
+			"message":  fmt.Sprintf("正在采集关键词: %s", keyword),
+		})
 
 		params := map[string]string{"Keyword": keyword}
 		data, err := executeTrace(browser, listTrace, params, solver)
 		if err != nil {
 			log.Printf("❌ 列表采集失败: %v", err)
+			updateCollectTask(taskID, map[string]interface{}{
+				"message": fmt.Sprintf("关键词 %s 采集失败: %v", keyword, err),
+			})
 			continue
 		}
 
 		listItems := data.([]map[string]string)
 		log.Printf("📋 列表采集完成，共 %d 条", len(listItems))
+		totalFound += len(listItems)
 
 		for i, item := range listItems {
+			// 检查是否被取消
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			title := item["title"]
-			if !containsKeyword(title, keywords) {
+			if !keywordMatcher.Match(title) {
 				continue
 			}
 
@@ -904,10 +1496,132 @@ func collectBySource(sourceID int, keywords []string) error {
 				tender.Attachments = detail["attachments"]
 			}
 
-			if err := saveTender(tender); err != nil {
+			result, err := saveTender(tender)
+			if err != nil {
 				log.Printf("❌ 保存失败: %v", err)
 			} else {
-				log.Printf("✅ 已保存到数据库")
+				switch result.Action {
+				case "created":
+					log.Printf("✅ 新增到数据库")
+					totalSaved++
+				case "updated":
+					log.Printf("🔄 更新已有记录")
+					totalSaved++
+				case "skipped":
+					log.Printf("⏭️  已存在且无变化，跳过")
+				}
+				updateCollectTask(taskID, map[string]interface{}{
+					"found": totalFound,
+					"saved": totalSaved,
+				})
+			}
+		}
+	}
+
+	updateCollectTask(taskID, map[string]interface{}{
+		"progress": 90,
+		"message":  fmt.Sprintf("采集完成，共发现 %d 条，保存 %d 条", totalFound, totalSaved),
+		"found":    totalFound,
+		"saved":    totalSaved,
+	})
+
+	return nil
+}
+
+func collectBySource(sourceID int, keywords []string) error {
+	var source Source
+	err := db.QueryRow("SELECT id, name, code, category, base_url FROM sources WHERE id = ?", sourceID).Scan(
+		&source.ID, &source.Name, &source.Code, &source.Category, &source.BaseURL,
+	)
+	if err != nil {
+		return fmt.Errorf("获取采集源失败: %v", err)
+	}
+
+	log.Printf("🚀 开始采集任务：采集源=%s, 关键词=%v", source.Name, keywords)
+
+	listTrace := getTraceBySourceAndType(sourceID, "list")
+	if listTrace == nil {
+		return fmt.Errorf("未找到列表轨迹，请先上传轨迹文件")
+	}
+
+	detailTrace := getTraceBySourceAndType(sourceID, "detail")
+	if detailTrace == nil {
+		log.Printf("⚠️ 未找到详情轨迹，将使用统一轨迹模式（仅采集列表页）")
+	}
+
+	browser, err := setupBrowser()
+	if err != nil {
+		return err
+	}
+	defer browser.Close()
+
+	solver := NewCaptchaSolver(captchaService)
+
+	// 创建关键词匹配器（性能优化）
+	keywordMatcher := NewKeywordMatcher(keywords, MatchModeAny)
+
+	for _, keyword := range keywords {
+		log.Printf("\n--- 关键词: %s ---", keyword)
+
+		params := map[string]string{"Keyword": keyword}
+		data, err := executeTrace(browser, listTrace, params, solver)
+		if err != nil {
+			log.Printf("❌ 列表采集失败: %v", err)
+			continue
+		}
+
+		listItems := data.([]map[string]string)
+		log.Printf("📋 列表采集完成，共 %d 条", len(listItems))
+
+		for i, item := range listItems {
+			title := item["title"]
+			if !keywordMatcher.Match(title) {
+				continue
+			}
+
+			log.Printf("\n[%d/%d] 采集详情: %s", i+1, len(listItems), title)
+
+			var detail map[string]string
+			if detailTrace != nil {
+				detailParams := map[string]string{"URL": item["url"]}
+				detailData, err := executeTrace(browser, detailTrace, detailParams, solver)
+				if err != nil {
+					log.Printf("❌ 详情采集失败: %v", err)
+					continue
+				}
+				detail = detailData.(map[string]string)
+			}
+
+			tender := &Tender{
+				SourceID:    sourceID,
+				Title:       title,
+				PublishDate: item["date"],
+				URL:         item["url"],
+				Keywords:    keyword,
+				Status:      "active",
+			}
+
+			if detail != nil {
+				tender.Amount = detail["amount"]
+				tender.Deadline = detail["deadline"]
+				tender.Contact = detail["contact"]
+				tender.Phone = detail["phone"]
+				tender.Content = detail["content"]
+				tender.Attachments = detail["attachments"]
+			}
+
+			result, err := saveTender(tender)
+			if err != nil {
+				log.Printf("❌ 保存失败: %v", err)
+			} else {
+				switch result.Action {
+				case "created":
+					log.Printf("✅ 新增到数据库")
+				case "updated":
+					log.Printf("🔄 更新已有记录")
+				case "skipped":
+					log.Printf("⏭️  已存在且无变化，跳过")
+				}
 			}
 
 			time.Sleep(2 * time.Second)
@@ -942,6 +1656,9 @@ func collectSingleProvince(province string, keywords []string) error {
 
 	solver := NewCaptchaSolver(captchaService)
 
+	// 创建关键词匹配器（性能优化）
+	keywordMatcher := NewKeywordMatcher(keywords, MatchModeAny)
+
 	for _, keyword := range keywords {
 		log.Printf("\n--- 关键词: %s ---", keyword)
 
@@ -957,7 +1674,7 @@ func collectSingleProvince(province string, keywords []string) error {
 
 		for i, item := range listItems {
 			title := item["title"]
-			if !containsKeyword(title, keywords) {
+			if !keywordMatcher.Match(title) {
 				continue
 			}
 
@@ -988,8 +1705,18 @@ func collectSingleProvince(province string, keywords []string) error {
 				Status:      "active",
 			}
 
-			if err := saveTender(tender); err != nil {
+			result, err := saveTender(tender)
+			if err != nil {
 				log.Printf("❌ 保存失败: %v", err)
+			} else {
+				switch result.Action {
+				case "created":
+					log.Printf("✅ 新增到数据库")
+				case "updated":
+					log.Printf("🔄 更新已有记录")
+				case "skipped":
+					log.Printf("⏭️  已存在且无变化，跳过")
+				}
 			}
 
 			time.Sleep(2 * time.Second)
@@ -1029,14 +1756,112 @@ func getTraceBySourceAndType(sourceID int, traceType string) *TraceFile {
 	return trace
 }
 
-func containsKeyword(text string, keywords []string) bool {
-	text = strings.ToLower(text)
+// KeywordMatchMode 关键词匹配模式
+type KeywordMatchMode string
+
+const (
+	MatchModeAny   KeywordMatchMode = "any"   // OR逻辑：匹配任意一个关键词即可
+	MatchModeAll   KeywordMatchMode = "all"   // AND逻辑：必须匹配所有关键词
+	MatchModeExact KeywordMatchMode = "exact" // 精确匹配：文本完全等于关键词
+)
+
+// KeywordMatcher 关键词匹配器
+type KeywordMatcher struct {
+	keywords      []string         // 原始关键词列表
+	lowercaseKeys []string         // 预处理的小写关键词（性能优化）
+	mode          KeywordMatchMode // 匹配模式
+}
+
+// NewKeywordMatcher 创建关键词匹配器
+func NewKeywordMatcher(keywords []string, mode KeywordMatchMode) *KeywordMatcher {
+	if mode == "" {
+		mode = MatchModeAny // 默认OR逻辑
+	}
+
+	// 预处理：转小写并去重
+	lowercaseKeys := make([]string, 0, len(keywords))
+	seen := make(map[string]bool)
+
 	for _, kw := range keywords {
-		if strings.Contains(text, strings.ToLower(kw)) {
-			return true
+		lower := strings.ToLower(strings.TrimSpace(kw))
+		if lower != "" && !seen[lower] {
+			lowercaseKeys = append(lowercaseKeys, lower)
+			seen[lower] = true
 		}
 	}
-	return false
+
+	// 按长度降序排序（长的在前，避免"软件开发"被"软件"先匹配）
+	for i := 0; i < len(lowercaseKeys); i++ {
+		for j := i + 1; j < len(lowercaseKeys); j++ {
+			if len(lowercaseKeys[i]) < len(lowercaseKeys[j]) {
+				lowercaseKeys[i], lowercaseKeys[j] = lowercaseKeys[j], lowercaseKeys[i]
+			}
+		}
+	}
+
+	return &KeywordMatcher{
+		keywords:      keywords,
+		lowercaseKeys: lowercaseKeys,
+		mode:          mode,
+	}
+}
+
+// Match 判断文本是否匹配关键词
+func (km *KeywordMatcher) Match(text string) bool {
+	if len(km.lowercaseKeys) == 0 {
+		return true // 没有关键词限制，全部匹配
+	}
+
+	text = strings.ToLower(text)
+
+	switch km.mode {
+	case MatchModeAll:
+		// AND逻辑：必须匹配所有关键词
+		for _, kw := range km.lowercaseKeys {
+			if !strings.Contains(text, kw) {
+				return false
+			}
+		}
+		return true
+
+	case MatchModeExact:
+		// 精确匹配：文本完全等于任意一个关键词
+		for _, kw := range km.lowercaseKeys {
+			if text == kw {
+				return true
+			}
+		}
+		return false
+
+	default: // MatchModeAny
+		// OR逻辑：匹配任意一个关键词即可
+		for _, kw := range km.lowercaseKeys {
+			if strings.Contains(text, kw) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// MatchedKeywords 返回匹配到的关键词列表
+func (km *KeywordMatcher) MatchedKeywords(text string) []string {
+	matched := []string{}
+	text = strings.ToLower(text)
+
+	for i, kw := range km.lowercaseKeys {
+		if strings.Contains(text, kw) {
+			matched = append(matched, km.keywords[i])
+		}
+	}
+
+	return matched
+}
+
+// containsKeyword 保留旧函数以兼容（内部使用KeywordMatcher）
+func containsKeyword(text string, keywords []string) bool {
+	matcher := NewKeywordMatcher(keywords, MatchModeAny)
+	return matcher.Match(text)
 }
 
 // ==================== HTTP API ====================
@@ -1045,7 +1870,11 @@ func startAPIServer() {
 	http.Handle("/", http.FileServer(http.FS(staticFiles)))
 
 	http.HandleFunc("/api/tenders", handleGetTenders)
+	http.HandleFunc("/api/tenders/export/csv", handleExportCSV)
 	http.HandleFunc("/api/collect", handleCollect)
+	http.HandleFunc("/api/collect/tasks", handleCollectTasks)
+	http.HandleFunc("/api/collect/task", handleCollectTask)
+	http.HandleFunc("/api/collect/task/cancel", handleCancelTask)
 	http.HandleFunc("/api/health", handleHealth)
 	http.HandleFunc("/api/sources", handleSources)
 	http.HandleFunc("/api/traces", handleTraces)
@@ -1060,21 +1889,39 @@ func startAPIServer() {
 
 func handleGetTenders(w http.ResponseWriter, r *http.Request) {
 	params := TenderQueryParams{
-		Category: r.URL.Query().Get("category"),
-		Status:   r.URL.Query().Get("status"),
-		Keyword:  r.URL.Query().Get("keyword"),
-		DateFrom: r.URL.Query().Get("date_from"),
-		DateTo:   r.URL.Query().Get("date_to"),
-		Tags:     r.URL.Query().Get("tags"),
-		Limit:    100,
+		Category:  r.URL.Query().Get("category"),
+		Status:    r.URL.Query().Get("status"),
+		Keyword:   r.URL.Query().Get("keyword"),
+		MatchMode: r.URL.Query().Get("match_mode"),
+		DateFrom:  r.URL.Query().Get("date_from"),
+		DateTo:    r.URL.Query().Get("date_to"),
+		Tags:      r.URL.Query().Get("tags"),
+		Limit:     20, // 默认每页20条
+		Page:      1,  // 默认第1页
 	}
+
+	// 解析source_id
 	if sourceIDStr := r.URL.Query().Get("source_id"); sourceIDStr != "" {
 		if sourceID, err := parseInt(sourceIDStr); err == nil {
 			params.SourceID = sourceID
 		}
 	}
 
-	tenders, err := queryTenders(params)
+	// 解析page
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if page, err := parseInt(pageStr); err == nil && page > 0 {
+			params.Page = page
+		}
+	}
+
+	// 解析limit（每页记录数）
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limit, err := parseInt(limitStr); err == nil && limit > 0 {
+			params.Limit = limit
+		}
+	}
+
+	result, err := queryTenders(params)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1087,18 +1934,99 @@ func handleGetTenders(w http.ResponseWriter, r *http.Request) {
 		SourceName string `json:"source_name"`
 		SourceType string `json:"source_type"`
 	}
-	var response []TenderResponse
-	for _, t := range tenders {
+	var responseData []TenderResponse
+	for _, t := range result.Data {
 		tr := TenderResponse{Tender: t}
 		if src, ok := sources[t.SourceID]; ok {
 			tr.SourceName = src.Name
 			tr.SourceType = src.Category
 		}
-		response = append(response, tr)
+		responseData = append(responseData, tr)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": response, "count": len(response)})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"data":        responseData,
+		"total":       result.Total,
+		"page":        result.Page,
+		"page_size":   result.PageSize,
+		"total_pages": result.TotalPages,
+	})
+}
+
+// handleExportCSV 处理CSV导出请求
+func handleExportCSV(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	params := TenderQueryParams{
+		Category:  r.URL.Query().Get("category"),
+		Status:    r.URL.Query().Get("status"),
+		Keyword:   r.URL.Query().Get("keyword"),
+		MatchMode: r.URL.Query().Get("match_mode"),
+		DateFrom:  r.URL.Query().Get("date_from"),
+		DateTo:    r.URL.Query().Get("date_to"),
+		Limit:     10000, // 导出最多10000条
+	}
+
+	// 解析source_id
+	if sourceIDStr := r.URL.Query().Get("source_id"); sourceIDStr != "" {
+		if sourceID, err := parseInt(sourceIDStr); err == nil {
+			params.SourceID = sourceID
+		}
+	}
+
+	// 执行CSV导出
+	if err := exportTendersToCSV(w, params); err != nil {
+		log.Printf("导出CSV失败: %v", err)
+		http.Error(w, fmt.Sprintf("导出失败: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// handleCancelTask 处理任务取消请求
+func handleCancelTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	taskID := r.URL.Query().Get("id")
+	if taskID == "" {
+		http.Error(w, "Missing task id", http.StatusBadRequest)
+		return
+	}
+
+	// 查询任务状态
+	task, err := getCollectTask(taskID)
+	if err != nil {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	// 只能取消运行中的任务
+	if task.Status != "running" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": fmt.Sprintf("任务状态为 %s，无法取消", task.Status),
+		})
+		return
+	}
+
+	// 执行取消
+	if err := cancelTask(taskID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "任务已取消",
+	})
 }
 
 func parseInt(s string) (int, error) {
@@ -1123,10 +2051,75 @@ func handleCollect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go runCollectTask(req.SourceID, req.Keywords)
+	// 创建任务记录
+	task, err := createCollectTask(req.SourceID, req.Keywords)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("创建任务失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// 异步执行采集任务
+	go runCollectTaskWithTracking(task.ID, req.SourceID, req.Keywords)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "采集任务已启动"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "采集任务已启动",
+		"task_id": task.ID,
+		"task":    task,
+	})
+}
+
+func handleCollectTasks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := parseInt(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	tasks, err := getAllCollectTasks(limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data":    tasks,
+		"count":   len(tasks),
+	})
+}
+
+func handleCollectTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	taskID := r.URL.Query().Get("id")
+	if taskID == "" {
+		http.Error(w, "Missing task id", http.StatusBadRequest)
+		return
+	}
+
+	task, err := getCollectTask(taskID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Task not found: %v", err), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data":    task,
+	})
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {

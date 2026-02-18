@@ -88,6 +88,7 @@
             <h1>招标信息监控系统</h1>
             <div class="nav-tabs">
                 <button class="nav-tab active" data-panel="tenders">招标列表</button>
+                <button class="nav-tab" data-panel="tasks">采集任务</button>
                 <button class="nav-tab" data-panel="sources">采集源</button>
                 <button class="nav-tab" data-panel="traces">轨迹管理</button>
             </div>
@@ -120,9 +121,16 @@
                         <option value="closed">已关闭</option>
                     </select>
                 </div>
-                <div class="form-group">
-                    <label>关键词</label>
-                    <input type="text" id="filterKeyword" placeholder="搜索标题/内容">
+                <div class="form-group" style="flex: 1.5;">
+                    <label>关键词搜索</label>
+                    <div style="display: flex; gap: 5px;">
+                        <input type="text" id="filterKeyword" placeholder="多个关键词用空格或逗号分隔" style="flex: 1;">
+                        <select id="filterMatchMode" style="width: 120px;">
+                            <option value="any" selected>任意匹配</option>
+                            <option value="all">全部匹配</option>
+                            <option value="exact">精确匹配</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label>日期范围</label>
@@ -130,6 +138,12 @@
                 </div>
                 <button class="btn btn-primary" onclick="loadTenders()">查询</button>
                 <button class="btn btn-success" onclick="startCollect()">采集</button>
+                <div style="position: relative;">
+                    <button class="btn" style="background:#f59e0b;color:white;" onclick="toggleExportMenu()">📥 导出</button>
+                    <div id="exportMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:5px;background:white;border:2px solid #e0e0e0;border-radius:8px;box-shadow:0 5px 15px rgba(0,0,0,0.2);min-width:120px;z-index:100;">
+                        <button class="btn" style="width:100%;text-align:left;background:white;color:#333;border:none;border-radius:8px 8px 0 0;" onclick="exportData('csv')">导出CSV</button>
+                    </div>
+                </div>
             </div>
 
             <div class="stats">
@@ -144,9 +158,34 @@
                     <span class="results-title">招标项目列表</span>
                     <span id="resultCount">共 0 条</span>
                 </div>
+                <div class="pagination-controls" style="padding: 15px 20px; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center; background: #f8f9fa;">
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <span style="font-size: 13px; color: #666;">每页显示</span>
+                        <select id="pageSizeSelect" onchange="changePageSize()" style="padding: 5px 10px; border: 2px solid #e0e0e0; border-radius: 6px;">
+                            <option value="10">10 条</option>
+                            <option value="20" selected>20 条</option>
+                            <option value="50">50 条</option>
+                            <option value="100">100 条</option>
+                        </select>
+                    </div>
+                    <div id="paginationButtons"></div>
+                    <div style="font-size: 13px; color: #666;">
+                        第 <span id="currentPageDisplay">1</span> / <span id="totalPagesDisplay">1</span> 页
+                    </div>
+                </div>
                 <div class="tender-list" id="tenderList">
                     <div class="empty-state">暂无数据</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- 采集任务面板 -->
+        <div id="tasks-panel" class="panel">
+            <div class="controls">
+                <button class="btn btn-primary" onclick="loadCollectTasks()">🔄 刷新</button>
+            </div>
+            <div class="source-list" id="taskList">
+                <div class="empty-state">加载中...</div>
             </div>
         </div>
 
@@ -269,6 +308,9 @@
         let sources = [];
         let tags = [];
         let tenders = [];
+        let currentPage = 1;
+        let currentPageSize = 20;
+        let totalPages = 1;
 
         // 导航切换
         document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -278,6 +320,7 @@
                 tab.classList.add('active');
                 document.getElementById(tab.dataset.panel + '-panel').classList.add('active');
                 
+                if(tab.dataset.panel === 'tasks') loadCollectTasks();
                 if(tab.dataset.panel === 'sources') loadSources();
                 if(tab.dataset.panel === 'traces') loadTraces();
             });
@@ -345,6 +388,72 @@
             } catch(e) { showToast('删除失败', 'error'); }
         }
 
+        // 加载采集任务列表
+        async function loadCollectTasks() {
+            try {
+                const res = await fetch('/api/collect/tasks?limit=50');
+                const data = await res.json();
+                if(data.success && data.data) {
+                    const tasks = data.data;
+                    const html = tasks.map(task => {
+                        const statusColors = {
+                            'pending': '#fbbf24',
+                            'running': '#3b82f6',
+                            'completed': '#10b981',
+                            'failed': '#ef4444',
+                            'cancelled': '#6b7280'
+                        };
+                        const statusTexts = {
+                            'pending': '等待中',
+                            'running': '运行中',
+                            'completed': '已完成',
+                            'failed': '失败',
+                            'cancelled': '已取消'
+                        };
+                        const keywords = JSON.parse(task.keywords || '[]');
+                        const createdAt = new Date(task.created_at).toLocaleString('zh-CN');
+
+                        return `
+                        <div class="trace-item">
+                            <div style="flex:1;">
+                                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                                    <strong>${task.source_name}</strong>
+                                    <span class="badge" style="background:${statusColors[task.status]};color:white;">${statusTexts[task.status]}</span>
+                                </div>
+                                <div style="font-size:12px;color:#666;margin-bottom:5px;">
+                                    关键词: ${keywords.join(', ')}
+                                </div>
+                                <div style="font-size:12px;color:#666;">
+                                    ${task.message} | 进度: ${task.progress}% | 发现: ${task.found} 条 | 保存: ${task.saved} 条
+                                </div>
+                                <div style="font-size:11px;color:#999;margin-top:5px;">
+                                    创建时间: ${createdAt}
+                                </div>
+                            </div>
+                            <div style="display:flex;flex-direction:column;align-items:center;gap:10px;">
+                                ${task.status === 'running' ?
+                                    `<button class="btn btn-sm" style="background:#ef4444;color:white;min-width:80px;" onclick="cancelTask('${task.id}')">取消任务</button>
+                                    <div style="width:50px;height:50px;border:3px solid #3b82f6;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;"></div>
+                                    <style>@keyframes spin { to { transform: rotate(360deg); }}</style>` : ''
+                                }
+                            </div>
+                        </div>`;
+                    }).join('');
+                    document.getElementById('taskList').innerHTML = html || '<div class="empty-state">暂无任务</div>';
+
+                    // 如果有运行中的任务，3秒后自动刷新
+                    if(tasks.some(t => t.status === 'running')) {
+                        setTimeout(loadCollectTasks, 3000);
+                    }
+                } else {
+                    document.getElementById('taskList').innerHTML = '<div class="empty-state">暂无任务</div>';
+                }
+            } catch(e) {
+                console.error(e);
+                document.getElementById('taskList').innerHTML = '<div class="empty-state">加载失败</div>';
+            }
+        }
+
         // 加载标签
         async function loadTags() {
             try {
@@ -355,12 +464,14 @@
         }
 
         // 加载招标列表
-        async function loadTenders() {
+        async function loadTenders(page = 1) {
+            currentPage = page;
             const params = new URLSearchParams();
             const category = document.getElementById('filterCategory').value;
             const source = document.getElementById('filterSource').value;
             const status = document.getElementById('filterStatus').value;
             const keyword = document.getElementById('filterKeyword').value;
+            const matchMode = document.getElementById('filterMatchMode').value;
             const dateFrom = document.getElementById('filterDateFrom').value;
             const dateTo = document.getElementById('filterDateTo').value;
 
@@ -368,8 +479,11 @@
             if(source) params.append('source_id', source);
             if(status) params.append('status', status);
             if(keyword) params.append('keyword', keyword);
+            if(matchMode) params.append('match_mode', matchMode);
             if(dateFrom) params.append('date_from', dateFrom);
             if(dateTo) params.append('date_to', dateTo);
+            params.append('page', page);
+            params.append('limit', currentPageSize);
 
             try {
                 const res = await fetch(`/api/tenders?${params}`);
@@ -390,15 +504,18 @@
                 if(data.success) {
                     const list = data.data || [];
                     tenders = list;
-                    displayTenders(list);
+                    totalPages = data.total_pages || 1;
+                    displayTenders(list, data.total);
                     updateStats(list);
+                    updatePaginationUI(data.page || 1, data.total_pages || 1, data.total || 0);
                 }
             } catch(e) { console.error(e); showToast('加载失败: ' + e.message, 'error'); }
         }
 
-        function displayTenders(list) {
-            document.getElementById('resultCount').textContent = `共 ${list.length} 条`;
-            
+        function displayTenders(list, total) {
+            const displayTotal = total !== undefined ? total : list.length;
+            document.getElementById('resultCount').textContent = `共 ${displayTotal} 条`;
+
             if(!list.length) {
                 document.getElementById('tenderList').innerHTML = '<div class="empty-state">暂无数据</div>';
                 return;
@@ -597,10 +714,26 @@
         async function startCollect() {
             const sourceId = document.getElementById('filterSource').value;
             const sourceID = sourceId ? parseInt(sourceId) : 0;
-            const keywords = ['软件', '软件开发', '信息化', '系统集成'];
+
+            // 从输入框读取关键词
+            const keywordInput = document.getElementById('filterKeyword').value.trim();
+            let keywords;
+
+            if(keywordInput) {
+                // 支持逗号、分号、空格分割
+                keywords = keywordInput.split(/[,，;；\s]+/).filter(k => k.length > 0);
+            } else {
+                // 没有输入时使用默认关键词
+                keywords = ['软件', '软件开发', '信息化', '系统集成'];
+            }
 
             if(sourceID === 0) {
                 showToast('请先选择采集源', 'error');
+                return;
+            }
+
+            if(keywords.length === 0) {
+                showToast('请输入采集关键词', 'error');
                 return;
             }
 
@@ -611,17 +744,201 @@
                     body: JSON.stringify({source_id: sourceID, keywords})
                 });
                 const data = await res.json();
-                if(data.success) showToast('采集任务已启动', 'success');
+                if(data.success) {
+                    showToast(`采集任务已启动 (关键词: ${keywords.join(', ')})`, 'success');
+                }
             } catch(e) { showToast('启动失败', 'error'); }
         }
 
         function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-        
+
         function showToast(msg, type) {
             const toast = document.getElementById('toast');
             toast.className = `toast toast-${type} show`;
             document.getElementById('toastMessage').textContent = msg;
             setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // 分页相关函数
+        function updatePaginationUI(page, total_pages, total) {
+            currentPage = page;
+            totalPages = total_pages;
+
+            document.getElementById('currentPageDisplay').textContent = page;
+            document.getElementById('totalPagesDisplay').textContent = total_pages;
+
+            const container = document.getElementById('paginationButtons');
+            container.innerHTML = '';
+            container.style.display = 'flex';
+            container.style.gap = '5px';
+            container.style.alignItems = 'center';
+
+            if (total_pages <= 1) {
+                container.style.display = 'none';
+                return;
+            }
+
+            // 首页按钮
+            addPageButton(container, '首页', 1, page === 1, false);
+
+            // 上一页按钮
+            addPageButton(container, '上一页', page - 1, page === 1, false);
+
+            // 页码按钮（智能显示）
+            const maxButtons = 7;
+            let startPage, endPage;
+
+            if (total_pages <= maxButtons) {
+                startPage = 1;
+                endPage = total_pages;
+            } else {
+                const halfButtons = Math.floor(maxButtons / 2);
+                if (page <= halfButtons + 1) {
+                    startPage = 1;
+                    endPage = maxButtons - 1;
+                } else if (page >= total_pages - halfButtons) {
+                    startPage = total_pages - maxButtons + 2;
+                    endPage = total_pages;
+                } else {
+                    startPage = page - halfButtons + 1;
+                    endPage = page + halfButtons - 1;
+                }
+            }
+
+            if (startPage > 1) {
+                addPageButton(container, '1', 1, false, page === 1);
+                if (startPage > 2) {
+                    container.appendChild(createEllipsis());
+                }
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                addPageButton(container, i.toString(), i, false, page === i);
+            }
+
+            if (endPage < total_pages) {
+                if (endPage < total_pages - 1) {
+                    container.appendChild(createEllipsis());
+                }
+                addPageButton(container, total_pages.toString(), total_pages, false, page === total_pages);
+            }
+
+            // 下一页按钮
+            addPageButton(container, '下一页', page + 1, page === total_pages, false);
+
+            // 末页按钮
+            addPageButton(container, '末页', total_pages, page === total_pages, false);
+        }
+
+        function addPageButton(container, text, targetPage, disabled, isActive) {
+            const btn = document.createElement('button');
+            btn.textContent = text;
+            btn.className = 'btn btn-sm';
+            btn.style.minWidth = '60px';
+            btn.style.padding = '5px 10px';
+            btn.style.fontSize = '12px';
+
+            if (disabled) {
+                btn.disabled = true;
+                btn.style.background = '#e0e0e0';
+                btn.style.color = '#999';
+                btn.style.cursor = 'not-allowed';
+            } else if (isActive) {
+                btn.style.background = '#667eea';
+                btn.style.color = 'white';
+            } else {
+                btn.style.background = 'white';
+                btn.style.color = '#333';
+                btn.style.border = '1px solid #e0e0e0';
+                btn.onclick = () => loadTenders(targetPage);
+            }
+
+            container.appendChild(btn);
+        }
+
+        function createEllipsis() {
+            const span = document.createElement('span');
+            span.textContent = '...';
+            span.style.padding = '0 5px';
+            span.style.color = '#666';
+            return span;
+        }
+
+        function changePageSize() {
+            currentPageSize = parseInt(document.getElementById('pageSizeSelect').value);
+            loadTenders(1); // 切换每页条数时跳转到第1页
+        }
+
+        // 取消任务
+        async function cancelTask(taskId) {
+            if (!confirm('确定要取消此采集任务吗？')) return;
+
+            try {
+                const res = await fetch(`/api/collect/task/cancel?id=${taskId}`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast('任务已取消', 'success');
+                    loadCollectTasks();
+                } else {
+                    showToast(data.message || '取消失败', 'error');
+                }
+            } catch (e) {
+                showToast('取消任务失败: ' + e.message, 'error');
+            }
+        }
+
+        // 导出相关函数
+        function toggleExportMenu() {
+            const menu = document.getElementById('exportMenu');
+            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // 点击其他地方关闭导出菜单
+        document.addEventListener('click', function(e) {
+            const menu = document.getElementById('exportMenu');
+            if (menu && !e.target.closest('button[onclick="toggleExportMenu()"]') && !e.target.closest('#exportMenu')) {
+                menu.style.display = 'none';
+            }
+        });
+
+        function exportData(format) {
+            document.getElementById('exportMenu').style.display = 'none';
+
+            const params = new URLSearchParams();
+
+            // 构建与当前查询相同的参数
+            const category = document.getElementById('filterCategory').value;
+            const source = document.getElementById('filterSource').value;
+            const status = document.getElementById('filterStatus').value;
+            const keyword = document.getElementById('filterKeyword').value;
+            const matchMode = document.getElementById('filterMatchMode')?.value;
+            const dateFrom = document.getElementById('filterDateFrom').value;
+            const dateTo = document.getElementById('filterDateTo').value;
+
+            if(category) params.append('category', category);
+            if(source) params.append('source_id', source);
+            if(status) params.append('status', status);
+            if(keyword) params.append('keyword', keyword);
+            if(matchMode) params.append('match_mode', matchMode);
+            if(dateFrom) params.append('date_from', dateFrom);
+            if(dateTo) params.append('date_to', dateTo);
+            params.append('limit', '10000');
+
+            const endpoint = format === 'csv' ? '/api/tenders/export/csv' : '/api/tenders/export/excel';
+            const url = `${endpoint}?${params}`;
+
+            showToast('正在准备导出，请稍候...', 'success');
+
+            // 使用隐藏iframe下载
+            const iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            iframe.src = url;
+            document.body.appendChild(iframe);
+
+            setTimeout(() => document.body.removeChild(iframe), 3000);
         }
 
         // 初始化

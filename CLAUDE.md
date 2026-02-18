@@ -25,6 +25,11 @@ go build -o convert-trace ./cmd/convert-trace/  # Chrome trace converter
 # Service management
 ./deploy.sh start | stop | restart | status | logs
 
+# Windows deployment (client connecting to remote captcha service)
+start-windows.bat      # Batch script (double-click or cmd)
+start-windows.ps1      # PowerShell script
+# Edit CAPTCHA_SERVICE variable to point to remote server before running
+
 # Convert Chrome DevTools Recorder trace to simplified format
 go run ./cmd/convert-trace/ recording.json list traces/province_list.json
 
@@ -84,13 +89,21 @@ Two-stage process triggered by `POST /api/collect`:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/health` | Health check |
-| GET | `/api/tenders?province=&keyword=` | Query stored tenders (max 100) |
+| GET | `/api/tenders?source_id=&keyword=&status=&date_from=&date_to=&tags=` | Query tenders with filters |
 | POST | `/api/collect` | Start async collection `{province, keywords[]}` |
+| GET | `/api/sources` | List/manage collection sources |
+| GET | `/api/traces` | List/manage trace records |
+| GET | `/api/tags` | List/manage tag definitions |
+| POST | `/api/tender/update` | Update tender status, tags, notes |
 | GET | `/` | Serves embedded static frontend |
 
 ### Database
 
-SQLite at `./data/tenders.db`. Single `tenders` table with `url UNIQUE` constraint for deduplication. Indexes on `province` and `publish_date`.
+SQLite at `./data/tenders.db`. Four main tables:
+- `sources` - Collection sources (provincial procurement sites, etc.) with code, category, base_url
+- `traces` - Trace records linked to sources (list/detail automation sequences)
+- `tag_definitions` - User-defined tags for organizing tenders (name, color, sort_order)
+- `tenders` - Tender records with `url UNIQUE` constraint for deduplication. Includes source_id FK, status (active/archived), tags, review fields, and attachments. Indexes on `source_id`, `publish_date`, and `status`.
 
 ### Key Dependencies
 
@@ -120,7 +133,7 @@ Note: There are no Go unit tests (*_test.go files) in this project. Testing is p
 
 ## Configuration
 
-Global variables in `main.go` (lines 74-79), overridable via environment:
+Global variables in `main.go` (lines 150-153), overridable via environment:
 
 | Variable | Default | Env Var |
 |----------|---------|---------|

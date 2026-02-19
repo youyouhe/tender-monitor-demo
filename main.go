@@ -1176,20 +1176,33 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 
 			// 智能识别验证码输入
 			if isCaptchaInput(step.Selector, step.Value) {
-				// 查找前一个点击（可能是验证码图片）
-				imgSelector := "img[src*='captcha']"
+				// 尝试智能查找验证码图片选择器
+				imgSelector := ""
+
+				// 方法1：查找包含 img/captcha/验证码 的选择器
 				for j := i - 1; j >= 0; j-- {
 					if intermediate[j].Type == "click" {
-						imgSelector = intermediate[j].Selector
-						// 移除这个点击步骤（因为会被captcha步骤替代）
-						if len(result) > 0 && result[len(result)-1].Action == "click" {
-							result = result[:len(result)-1]
-							if len(result) > 0 && result[len(result)-1].Action == "wait" {
+						sel := intermediate[j].Selector
+						if strings.Contains(sel, "img") ||
+						   strings.Contains(sel, "captcha") ||
+						   strings.Contains(sel, "验证码") {
+							imgSelector = sel
+							// 移除这个点击步骤
+							if len(result) > 0 && result[len(result)-1].Action == "click" {
 								result = result[:len(result)-1]
+								if len(result) > 0 && result[len(result)-1].Action == "wait" {
+									result = result[:len(result)-1]
+								}
 							}
+							break
 						}
-						break
 					}
+				}
+
+				// 方法2：使用通用选择器
+				if imgSelector == "" {
+					imgSelector = "img[src*='captcha'], img[alt*='验证码'], img[title*='验证码']"
+					log.Printf("⚠️ 未找到验证码图片选择器，使用通用选择器")
 				}
 
 				result = append(result, TraceStep{

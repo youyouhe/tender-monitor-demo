@@ -1055,16 +1055,14 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 	}
 
 	// 第一遍：分析步骤，检测列表结构
-	for i, step := range chromeSteps {
-		if step.Type == "click" && i < len(chromeSteps)-1 {
-			nextStep := chromeSteps[i+1]
-			// 检测列表行点击（导致页面跳转）
-			if nextStep.Type == "navigate" {
-				selector := extractBestSelector(step.Selectors)
-				if isListRowClick(selector) {
-					listSelector = inferListSelector(selector)
-					listFieldInfo = inferListFields(step.Selectors)
-				}
+	for _, step := range chromeSteps {
+		if step.Type == "click" {
+			selector := extractBestSelector(step.Selectors)
+			// 检测列表行点击（无论是否导致页面跳转）
+			if isListRowClick(selector) {
+				listSelector = inferListSelector(selector)
+				listFieldInfo = inferListFields(step.Selectors)
+				log.Printf("🔍 检测到列表行点击: selector=%s", selector)
 			}
 		}
 	}

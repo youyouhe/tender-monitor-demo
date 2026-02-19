@@ -1070,7 +1070,6 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 	}
 
 	// 第二遍：转换步骤
-	var hasNavigated bool
 	for _, step := range chromeSteps {
 		// 跳过不需要的步骤
 		if shouldSkipStep(step.Type) {
@@ -1083,15 +1082,8 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 				Type: "navigate",
 				URL:  step.URL,
 			})
-			hasNavigated = true
 
 		case "click":
-			if hasNavigated {
-				// 跳过导航后的首次点击（通常是列表行点击，已被记录）
-				hasNavigated = false
-				continue
-			}
-
 			selector := extractBestSelector(step.Selectors)
 			if selector == "" {
 				continue
@@ -1102,8 +1094,20 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 				continue
 			}
 
-			// 跳过输入框点击（会有后续的change事件）
-			if isInputClick(selector) {
+			// 跳过输入框点击（检查所有选择器，不仅仅是最佳选择器）
+			isInput := false
+			for _, selectorGroup := range step.Selectors {
+				if len(selectorGroup) > 0 {
+					sel := selectorGroup[0]
+					if strings.Contains(sel, "input") ||
+						strings.Contains(sel, "请输入") ||
+						strings.Contains(sel, "[role=\"textbox\"]") {
+						isInput = true
+						break
+					}
+				}
+			}
+			if isInput {
 				continue
 			}
 

@@ -150,6 +150,7 @@ type ChromeDevToolsStep struct {
 	Type      string     `json:"type"`
 	URL       string     `json:"url"`
 	Selectors [][]string `json:"selectors"`
+	Value     string     `json:"value"` // change事件的输入值
 }
 
 // ChromeDevToolsRecording Chrome DevTools 录制
@@ -1012,25 +1013,92 @@ func parseTraceFile(content string) (*TraceFile, error) {
 	}
 
 	for _, step := range chrome.Steps {
-		if step.Type == "setViewport" {
-			continue
-		}
-		newStep := TraceStep{
-			Action: step.Type,
-			URL:    step.URL,
-		}
-		if len(step.Selectors) > 0 && len(step.Selectors[0]) > 0 {
-			sel := step.Selectors[0][0]
-			if strings.HasPrefix(sel, "xpath") {
-				newStep.XPath = sel
-			} else if strings.HasPrefix(sel, "pierce") {
-				newStep.Selector = strings.TrimPrefix(sel, "pierce/")
-			} else if strings.HasPrefix(sel, "aria") {
-				newStep.Selector = sel
-			} else {
-				newStep.Selector = sel
+		// 跳过不需要的步骤类型
+		skipTypes := []string{"setViewport", "keyDown", "keyUp"}
+		shouldSkip := false
+		for _, skipType := range skipTypes {
+			if step.Type == skipType {
+				shouldSkip = true
+				break
 			}
 		}
+		if shouldSkip {
+			continue
+		}
+
+		// change事件转换为input操作
+		action := step.Type
+		if action == "change" {
+			action = "input"
+		}
+
+		newStep := TraceStep{
+			Action: action,
+			URL:    step.URL,
+			Value:  step.Value, // 提取输入值（用于input操作）
+		}
+
+		// 智能选择器提取：优先使用ID/Class选择器，跳过不支持的aria选择器
+		if len(step.Selectors) > 0 {
+			var selectedSelector string
+			var useXPath bool
+
+			// 遍历所有备选选择器，按优先级选择
+			for _, selectorGroup := range step.Selectors {
+				if len(selectorGroup) == 0 {
+					continue
+				}
+				sel := selectorGroup[0]
+
+				// 跳过不支持的选择器格式
+				if strings.HasPrefix(sel, "aria/") || strings.HasPrefix(sel, "text/") {
+					continue
+				}
+
+				// XPath选择器
+				if strings.HasPrefix(sel, "xpath") {
+					if selectedSelector == "" {
+						selectedSelector = sel
+						useXPath = true
+					}
+					continue
+				}
+
+				// Pierce/Shadow DOM选择器
+				if strings.HasPrefix(sel, "pierce/") {
+					sel = strings.TrimPrefix(sel, "pierce/")
+					if selectedSelector == "" {
+						selectedSelector = sel
+						useXPath = false
+					}
+					continue
+				}
+
+				// 标准CSS选择器（ID、Class等）- 最高优先级
+				// 如果包含#（ID选择器），立即使用并停止搜索
+				if strings.Contains(sel, "#") {
+					selectedSelector = sel
+					useXPath = false
+					break
+				}
+
+				// 其他CSS选择器
+				if selectedSelector == "" || useXPath {
+					selectedSelector = sel
+					useXPath = false
+				}
+			}
+
+			// 应用选择的选择器
+			if selectedSelector != "" {
+				if useXPath {
+					newStep.XPath = selectedSelector
+				} else {
+					newStep.Selector = selectedSelector
+				}
+			}
+		}
+
 		trace.Steps = append(trace.Steps, newStep)
 	}
 

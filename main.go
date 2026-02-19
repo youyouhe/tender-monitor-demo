@@ -1232,6 +1232,7 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 			Selector: listSelector,
 			Fields:   fields,
 		})
+		log.Printf("📊 生成 extract 步骤: selector=%s, fields=%+v", listSelector, fields)
 	} else if traceType == "detail" {
 		result = append(result, TraceStep{
 			Action: "extract",
@@ -1673,6 +1674,9 @@ func extractList(page *rod.Page, step TraceStep) []map[string]string {
 
 		if hasValidData && item["url"] != "" {
 			results = append(results, item)
+			log.Printf("  提取数据: title=%s, date=%s, url=%s", item["title"], item["date"], item["url"])
+		} else {
+			log.Printf("  跳过无效数据: hasValidData=%v, url=%s", hasValidData, item["url"])
 		}
 
 		if len(results) >= 10 {
@@ -1944,10 +1948,11 @@ func collectBySourceWithProgress(ctx context.Context, taskID string, sourceID in
 
 			title := item["title"]
 			if !keywordMatcher.Match(title) {
+				log.Printf("  [%d/%d] 跳过（关键词不匹配）: %s", i+1, len(listItems), title)
 				continue
 			}
 
-			log.Printf("\n[%d/%d] 采集详情: %s", i+1, len(listItems), title)
+			log.Printf("\n[%d/%d] 准备保存: %s", i+1, len(listItems), title)
 
 			var detail map[string]string
 			if detailTrace != nil {
@@ -2058,10 +2063,11 @@ func collectBySource(sourceID int, keywords []string) error {
 		for i, item := range listItems {
 			title := item["title"]
 			if !keywordMatcher.Match(title) {
+				log.Printf("  [%d/%d] 跳过（关键词不匹配）: %s", i+1, len(listItems), title)
 				continue
 			}
 
-			log.Printf("\n[%d/%d] 采集详情: %s", i+1, len(listItems), title)
+			log.Printf("\n[%d/%d] 准备保存: %s", i+1, len(listItems), title)
 
 			var detail map[string]string
 			if detailTrace != nil {
@@ -2157,10 +2163,11 @@ func collectSingleProvince(province string, keywords []string) error {
 		for i, item := range listItems {
 			title := item["title"]
 			if !keywordMatcher.Match(title) {
+				log.Printf("  [%d/%d] 跳过（关键词不匹配）: %s", i+1, len(listItems), title)
 				continue
 			}
 
-			log.Printf("\n[%d/%d] 采集详情: %s", i+1, len(listItems), title)
+			log.Printf("\n[%d/%d] 准备保存: %s", i+1, len(listItems), title)
 
 			detailParams := map[string]string{"URL": item["url"]}
 			detailData, err := executeTrace(browser, detailTrace, detailParams, solver)

@@ -1156,10 +1156,10 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 				Action:   "click",
 				Selector: step.Selector,
 			})
-			// 查询按钮等待更长时间
-			waitTime := 500
+			// 点击后的等待时间
+			waitTime := 2000 // 默认2秒，足够动画和元素加载
 			if isSearchButton(step.Selector) {
-				waitTime = 3000
+				waitTime = 3000 // 查询按钮等待3秒
 			}
 			result = append(result, TraceStep{
 				Action:   "wait",

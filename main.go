@@ -2186,14 +2186,32 @@ func getTraceBySourceAndType(sourceID int, traceType string) *TraceFile {
 	var rawContent string
 	err := db.QueryRow("SELECT raw_content FROM traces WHERE source_id = ? AND type = ? AND status = 'active' LIMIT 1", sourceID, traceType).Scan(&rawContent)
 	if err != nil {
+		log.Printf("❌ 查询轨迹失败: source_id=%d, type=%s, error=%v", sourceID, traceType, err)
+
+		// 调试：列出所有轨迹
+		rows, debugErr := db.Query("SELECT id, source_id, name, type, status FROM traces")
+		if debugErr == nil {
+			log.Printf("📋 数据库中的所有轨迹：")
+			for rows.Next() {
+				var id, sid int
+				var name, ttype, status string
+				rows.Scan(&id, &sid, &name, &ttype, &status)
+				log.Printf("   - ID=%d, source_id=%d, name=%s, type=%s, status=%s", id, sid, name, ttype, status)
+			}
+			rows.Close()
+		}
 		return nil
 	}
 
+	log.Printf("✅ 找到轨迹: source_id=%d, type=%s, raw_content长度=%d", sourceID, traceType, len(rawContent))
+
 	trace, err := parseTraceFile(rawContent)
 	if err != nil {
-		log.Printf("解析轨迹失败: %v", err)
+		log.Printf("❌ 解析轨迹失败: %v", err)
 		return nil
 	}
+
+	log.Printf("✅ 轨迹解析成功: %d 个步骤", len(trace.Steps))
 	return trace
 }
 

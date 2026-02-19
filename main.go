@@ -1266,6 +1266,7 @@ func extractBestSelector(selectors [][]string) string {
 
 	var selectedSelector string
 	var fallbackSelector string // 降级选择器（即使是动态的）
+	var ariaPlaceholder string   // 从 aria 选择器提取的 placeholder
 	var priority int             // 优先级：3=ID, 2=CSS, 1=XPath, 0=其他
 
 	for _, selectorGroup := range selectors {
@@ -1274,8 +1275,17 @@ func extractBestSelector(selectors [][]string) string {
 		}
 		sel := selectorGroup[0]
 
-		// 跳过不支持的格式
-		if strings.HasPrefix(sel, "aria/") || strings.HasPrefix(sel, "text/") {
+		// 提取 aria 选择器中的 placeholder 信息
+		if strings.HasPrefix(sel, "aria/") {
+			ariaText := strings.TrimPrefix(sel, "aria/")
+			if strings.Contains(ariaText, "请输入") {
+				ariaPlaceholder = ariaText
+			}
+			continue
+		}
+
+		// 跳过 text 选择器
+		if strings.HasPrefix(sel, "text/") {
 			continue
 		}
 
@@ -1331,6 +1341,17 @@ func extractBestSelector(selectors [][]string) string {
 		if priority < 2 {
 			selectedSelector = sel
 			priority = 2
+		}
+	}
+
+	// 如果没有找到稳定的选择器，尝试从 aria 生成
+	if selectedSelector == "" && ariaPlaceholder != "" {
+		// 从 aria 文本生成基于 placeholder 的选择器
+		placeholderText := strings.TrimPrefix(ariaPlaceholder, "请输入")
+		if placeholderText != "" {
+			generatedSelector := fmt.Sprintf("input[placeholder*=\"%s\"]", placeholderText)
+			log.Printf("✨ 从 aria 生成稳定选择器: %s", generatedSelector)
+			return generatedSelector
 		}
 	}
 

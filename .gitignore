@@ -3,6 +3,9 @@
 *.dll
 *.so
 *.dylib
+tender-monitor
+cmd/collect/collect
+cmd/convert-trace/convert-trace
 
 # Test binary, built with `go test -c`
 *.test

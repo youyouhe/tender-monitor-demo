@@ -1006,104 +1006,395 @@ func parseTraceFile(content string) (*TraceFile, error) {
 	trace.Name = chrome.Title
 	trace.URL = chrome.URL
 
-	if strings.Contains(chrome.URL, "noticeGd") || strings.Contains(chrome.URL, "detail") {
+	// 智能推断轨迹类型
+	if strings.Contains(chrome.URL, "detail") || strings.Contains(chrome.Title, "详情") {
 		trace.Type = "detail"
 	} else {
 		trace.Type = "list"
 	}
 
-	for _, step := range chrome.Steps {
-		// 跳过不需要的步骤类型
-		skipTypes := []string{"setViewport", "keyDown", "keyUp"}
-		shouldSkip := false
-		for _, skipType := range skipTypes {
-			if step.Type == skipType {
-				shouldSkip = true
-				break
+	// 使用高级转换逻辑（与convert-trace工具一致）
+	trace.Steps = convertChromeStepsAdvanced(chrome.Steps, trace.Type, chrome.URL)
+
+	log.Printf("📝 Chrome DevTools 格式已转换: %d 步骤 → %d 步骤", len(chrome.Steps), len(trace.Steps))
+	return &trace, nil
+}
+
+// convertChromeStepsAdvanced 高级轨迹转换（整合convert-trace工具逻辑）
+func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType string, baseURL string) []TraceStep {
+	// 中间步骤结构
+	type intermediateStep struct {
+		Type     string
+		Selector string
+		Value    string
+		URL      string
+	}
+
+	var intermediate []intermediateStep
+	pendingChanges := make(map[string]string) // 合并同一输入框的多次change事件
+	var listSelector string
+	var listFieldInfo struct {
+		titleSelector string
+		dateSelector  string
+		urlSelector   string
+	}
+
+	// 刷新待处理的输入事件
+	flushPendingChanges := func() {
+		for selector, value := range pendingChanges {
+			if value != "" {
+				intermediate = append(intermediate, intermediateStep{
+					Type:     "input",
+					Selector: selector,
+					Value:    value,
+				})
 			}
 		}
-		if shouldSkip {
+		pendingChanges = make(map[string]string)
+	}
+
+	// 第一遍：分析步骤，检测列表结构
+	for i, step := range chromeSteps {
+		if step.Type == "click" && i < len(chromeSteps)-1 {
+			nextStep := chromeSteps[i+1]
+			// 检测列表行点击（导致页面跳转）
+			if nextStep.Type == "navigate" {
+				selector := extractBestSelector(step.Selectors)
+				if isListRowClick(selector) {
+					listSelector = inferListSelector(selector)
+					listFieldInfo = inferListFields(step.Selectors)
+				}
+			}
+		}
+	}
+
+	// 第二遍：转换步骤
+	var hasNavigated bool
+	for _, step := range chromeSteps {
+		// 跳过不需要的步骤
+		if shouldSkipStep(step.Type) {
 			continue
 		}
 
-		// change事件转换为input操作
-		action := step.Type
-		if action == "change" {
-			action = "input"
-		}
+		switch step.Type {
+		case "navigate":
+			intermediate = append(intermediate, intermediateStep{
+				Type: "navigate",
+				URL:  step.URL,
+			})
+			hasNavigated = true
 
-		newStep := TraceStep{
-			Action: action,
-			URL:    step.URL,
-			Value:  step.Value, // 提取输入值（用于input操作）
-		}
-
-		// 智能选择器提取：优先使用ID/Class选择器，跳过不支持的aria选择器
-		if len(step.Selectors) > 0 {
-			var selectedSelector string
-			var useXPath bool
-
-			// 遍历所有备选选择器，按优先级选择
-			for _, selectorGroup := range step.Selectors {
-				if len(selectorGroup) == 0 {
-					continue
-				}
-				sel := selectorGroup[0]
-
-				// 跳过不支持的选择器格式
-				if strings.HasPrefix(sel, "aria/") || strings.HasPrefix(sel, "text/") {
-					continue
-				}
-
-				// XPath选择器
-				if strings.HasPrefix(sel, "xpath") {
-					if selectedSelector == "" {
-						selectedSelector = sel
-						useXPath = true
-					}
-					continue
-				}
-
-				// Pierce/Shadow DOM选择器
-				if strings.HasPrefix(sel, "pierce/") {
-					sel = strings.TrimPrefix(sel, "pierce/")
-					if selectedSelector == "" {
-						selectedSelector = sel
-						useXPath = false
-					}
-					continue
-				}
-
-				// 标准CSS选择器（ID、Class等）- 最高优先级
-				// 如果包含#（ID选择器），立即使用并停止搜索
-				if strings.Contains(sel, "#") {
-					selectedSelector = sel
-					useXPath = false
-					break
-				}
-
-				// 其他CSS选择器
-				if selectedSelector == "" || useXPath {
-					selectedSelector = sel
-					useXPath = false
-				}
+		case "click":
+			if hasNavigated {
+				// 跳过导航后的首次点击（通常是列表行点击，已被记录）
+				hasNavigated = false
+				continue
 			}
 
-			// 应用选择的选择器
-			if selectedSelector != "" {
-				if useXPath {
-					newStep.XPath = selectedSelector
-				} else {
-					newStep.Selector = selectedSelector
-				}
+			selector := extractBestSelector(step.Selectors)
+			if selector == "" {
+				continue
+			}
+
+			// 跳过列表行点击
+			if isListRowClick(selector) {
+				continue
+			}
+
+			// 跳过输入框点击（会有后续的change事件）
+			if isInputClick(selector) {
+				continue
+			}
+
+			flushPendingChanges()
+
+			intermediate = append(intermediate, intermediateStep{
+				Type:     "click",
+				Selector: selector,
+			})
+
+		case "change":
+			selector := extractBestSelector(step.Selectors)
+			if selector != "" {
+				pendingChanges[selector] = step.Value
 			}
 		}
-
-		trace.Steps = append(trace.Steps, newStep)
 	}
 
-	log.Printf("📝 Chrome DevTools 格式已转换: %d 步骤", len(trace.Steps))
-	return &trace, nil
+	flushPendingChanges()
+
+	// 第三遍：构建最终步骤并优化
+	var result []TraceStep
+
+	for i, step := range intermediate {
+		switch step.Type {
+		case "navigate":
+			result = append(result, TraceStep{
+				Action: "navigate",
+				URL:    step.URL,
+			})
+			result = append(result, TraceStep{
+				Action:   "wait",
+				WaitTime: 2000,
+			})
+
+		case "click":
+			result = append(result, TraceStep{
+				Action:   "click",
+				Selector: step.Selector,
+			})
+			// 查询按钮等待更长时间
+			waitTime := 500
+			if isSearchButton(step.Selector) {
+				waitTime = 3000
+			}
+			result = append(result, TraceStep{
+				Action:   "wait",
+				WaitTime: waitTime,
+			})
+
+		case "input":
+			value := step.Value
+
+			// 智能识别关键词输入框
+			if isKeywordInputField(step.Selector) {
+				value = "{{.Keyword}}"
+			}
+
+			// 智能识别验证码输入
+			if isCaptchaInput(step.Selector, step.Value) {
+				// 查找前一个点击（可能是验证码图片）
+				imgSelector := "img[src*='captcha']"
+				for j := i - 1; j >= 0; j-- {
+					if intermediate[j].Type == "click" {
+						imgSelector = intermediate[j].Selector
+						// 移除这个点击步骤（因为会被captcha步骤替代）
+						if len(result) > 0 && result[len(result)-1].Action == "click" {
+							result = result[:len(result)-1]
+							if len(result) > 0 && result[len(result)-1].Action == "wait" {
+								result = result[:len(result)-1]
+							}
+						}
+						break
+					}
+				}
+
+				result = append(result, TraceStep{
+					Action:        "captcha",
+					ImageSelector: imgSelector,
+					InputSelector: step.Selector,
+				})
+			} else {
+				result = append(result, TraceStep{
+					Action:   "input",
+					Selector: step.Selector,
+					Value:    value,
+				})
+			}
+		}
+	}
+
+	// 自动添加数据提取步骤
+	if traceType == "list" {
+		// 使用分析出的列表结构
+		if listSelector == "" {
+			listSelector = "tbody tr" // 默认值
+		}
+		fields := map[string]string{
+			"title": listFieldInfo.titleSelector,
+			"date":  listFieldInfo.dateSelector,
+			"url":   listFieldInfo.urlSelector,
+		}
+		if fields["title"] == "" {
+			fields = map[string]string{
+				"title": "td:nth-child(1) span",
+				"date":  "td:nth-child(3)",
+				"url":   "td:nth-child(1) span",
+			}
+		}
+
+		result = append(result, TraceStep{
+			Action:   "extract",
+			Type:     "list",
+			Selector: listSelector,
+			Fields:   fields,
+		})
+	} else if traceType == "detail" {
+		result = append(result, TraceStep{
+			Action: "extract",
+			Type:   "detail",
+			Fields: map[string]string{
+				"amount":  "span:contains('预算金额')",
+				"contact": "span:contains('联系人')",
+				"phone":   "span:contains('联系电话')",
+			},
+		})
+	}
+
+	return result
+}
+
+// shouldSkipStep 判断是否应跳过该步骤
+func shouldSkipStep(stepType string) bool {
+	skipTypes := []string{"setViewport", "keyDown", "keyUp", "scroll"}
+	for _, t := range skipTypes {
+		if stepType == t {
+			return true
+		}
+	}
+	return false
+}
+
+// extractBestSelector 智能选择最佳选择器
+func extractBestSelector(selectors [][]string) string {
+	if len(selectors) == 0 {
+		return ""
+	}
+
+	var selectedSelector string
+	var priority int // 优先级：3=ID, 2=CSS, 1=XPath, 0=其他
+
+	for _, selectorGroup := range selectors {
+		if len(selectorGroup) == 0 {
+			continue
+		}
+		sel := selectorGroup[0]
+
+		// 跳过不支持的格式
+		if strings.HasPrefix(sel, "aria/") || strings.HasPrefix(sel, "text/") {
+			continue
+		}
+
+		// 处理 Pierce 选择器
+		if strings.HasPrefix(sel, "pierce/") {
+			sel = strings.TrimPrefix(sel, "pierce/")
+		}
+
+		// XPath 选择器
+		if strings.HasPrefix(sel, "xpath") {
+			if priority < 1 {
+				selectedSelector = sel
+				priority = 1
+			}
+			continue
+		}
+
+		// ID 选择器（最高优先级）
+		if strings.Contains(sel, "#") && !strings.Contains(sel, "xpath") {
+			selectedSelector = sel
+			priority = 3
+			break
+		}
+
+		// 标准 CSS 选择器
+		if priority < 2 {
+			selectedSelector = sel
+			priority = 2
+		}
+	}
+
+	return selectedSelector
+}
+
+// isListRowClick 判断是否是列表行点击
+func isListRowClick(selector string) bool {
+	patterns := []string{
+		"tr:nth-of-type", "tbody tr", "td:nth-of-type",
+		"li:nth-of-type", ".list-item", ".item",
+	}
+	for _, p := range patterns {
+		if strings.Contains(selector, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// inferListSelector 从行选择器推断列表容器选择器
+func inferListSelector(rowSelector string) string {
+	if strings.Contains(rowSelector, "tr:nth-of-type") || strings.Contains(rowSelector, "tbody") {
+		return "tbody tr"
+	}
+	if strings.Contains(rowSelector, "li:nth-of-type") {
+		return "ul li"
+	}
+	return "tbody tr"
+}
+
+// inferListFields 从选择器推断列表字段映射
+func inferListFields(selectors [][]string) struct {
+	titleSelector string
+	dateSelector  string
+	urlSelector   string
+} {
+	result := struct {
+		titleSelector string
+		dateSelector  string
+		urlSelector   string
+	}{
+		titleSelector: "td:nth-child(1) span",
+		dateSelector:  "td:nth-child(3)",
+		urlSelector:   "td:nth-child(1) span",
+	}
+
+	// 从 xpath 中解析列索引
+	for _, selectorGroup := range selectors {
+		for _, sel := range selectorGroup {
+			if strings.HasPrefix(sel, "xpath") && strings.Contains(sel, "/td[") {
+				// 解析: xpath///.../td[3]/...
+				if idx := strings.Index(sel, "/td["); idx != -1 {
+					rest := sel[idx+4:]
+					if end := strings.Index(rest, "]"); end != -1 {
+						var colNum int
+						if _, err := fmt.Sscanf(rest[:end], "%d", &colNum); err == nil {
+							result.titleSelector = fmt.Sprintf("td:nth-child(%d) span", colNum)
+							result.urlSelector = fmt.Sprintf("td:nth-child(%d) span", colNum)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// isInputClick 判断是否是输入框点击
+func isInputClick(selector string) bool {
+	return strings.Contains(selector, "input") ||
+		strings.Contains(selector, "[role=\"textbox\"]")
+}
+
+// isSearchButton 判断是否是查询按钮
+func isSearchButton(selector string) bool {
+	return strings.Contains(selector, "button") &&
+		(strings.Contains(selector, "primary") ||
+			strings.Contains(selector, "search") ||
+			strings.Contains(selector, "查询"))
+}
+
+// isKeywordInputField 判断是否是关键词输入框
+func isKeywordInputField(selector string) bool {
+	keywords := []string{"标题", "关键词", "keyword", "title", "搜索", "search"}
+	selectorLower := strings.ToLower(selector)
+	for _, kw := range keywords {
+		if strings.Contains(selectorLower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCaptchaInput 判断是否是验证码输入
+func isCaptchaInput(selector string, value string) bool {
+	if strings.Contains(selector, "验证码") || strings.Contains(selector, "captcha") {
+		return true
+	}
+	// 4位数字/字母组合通常是验证码
+	if len(value) == 4 && !strings.Contains(value, " ") {
+		return true
+	}
+	return false
 }
 
 // ==================== 浏览器自动化 ====================

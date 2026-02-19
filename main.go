@@ -1069,15 +1069,16 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 		}
 	}
 
-	// 第二遍：转换步骤
-	for _, step := range chromeSteps {
-		// 跳过不需要的步骤
+	// 第二遍：转换步骤（保守策略：保留为主，删除为辅）
+	for i, step := range chromeSteps {
+		// 只跳过明确无用的步骤
 		if shouldSkipStep(step.Type) {
 			continue
 		}
 
 		switch step.Type {
 		case "navigate":
+			flushPendingChanges()
 			intermediate = append(intermediate, intermediateStep{
 				Type: "navigate",
 				URL:  step.URL,
@@ -1089,34 +1090,33 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 				continue
 			}
 
-			// 跳过列表行点击
-			if isListRowClick(selector) {
-				continue
+			// 只跳过会导致页面跳转的列表行点击（后面紧跟navigate）
+			if i < len(chromeSteps)-1 && chromeSteps[i+1].Type == "navigate" {
+				if isListRowClick(selector) {
+					continue
+				}
 			}
 
-			// 跳过输入框点击（检查所有选择器，不仅仅是最佳选择器）
-			isInput := false
-			for _, selectorGroup := range step.Selectors {
-				if len(selectorGroup) > 0 {
-					sel := selectorGroup[0]
-					if strings.Contains(sel, "input") ||
-						strings.Contains(sel, "请输入") ||
-						strings.Contains(sel, "[role=\"textbox\"]") {
-						isInput = true
-						break
+			// 检查下一步是否是同一元素的change事件
+			// 如果是，则跳过click（change会被转为input）
+			skipClick := false
+			if i < len(chromeSteps)-1 {
+				nextStep := chromeSteps[i+1]
+				if nextStep.Type == "change" {
+					nextSelector := extractBestSelector(nextStep.Selectors)
+					if nextSelector == selector {
+						skipClick = true
 					}
 				}
 			}
-			if isInput {
-				continue
+
+			if !skipClick {
+				flushPendingChanges()
+				intermediate = append(intermediate, intermediateStep{
+					Type:     "click",
+					Selector: selector,
+				})
 			}
-
-			flushPendingChanges()
-
-			intermediate = append(intermediate, intermediateStep{
-				Type:     "click",
-				Selector: selector,
-			})
 
 		case "change":
 			selector := extractBestSelector(step.Selectors)

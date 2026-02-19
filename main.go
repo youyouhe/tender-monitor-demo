@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
 	_ "modernc.org/sqlite"
 )
 
@@ -1421,6 +1422,9 @@ func executeTrace(browser *rod.Browser, trace *TraceFile, params map[string]stri
 	page := browser.MustPage()
 	defer page.Close()
 
+	// 设置全局超时时间为30秒
+	page = page.Timeout(30 * time.Second)
+
 	var extractedData interface{}
 
 	for i, step := range trace.Steps {
@@ -1435,18 +1439,42 @@ func executeTrace(browser *rod.Browser, trace *TraceFile, params map[string]stri
 			page.MustWaitLoad()
 		case "click":
 			selector := replaceParams(step.Selector, params)
-			page.MustElement(selector).MustClick()
+			log.Printf("🔍 查找元素: %s", selector)
+			elem, err := page.Element(selector)
+			if err != nil {
+				return nil, fmt.Errorf("找不到点击元素 '%s': %v", selector, err)
+			}
+			if err := elem.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return nil, fmt.Errorf("点击失败: %v", err)
+			}
 			time.Sleep(500 * time.Millisecond)
 		case "input":
 			selector := replaceParams(step.Selector, params)
 			value := replaceParams(step.Value, params)
-			page.MustElement(selector).MustSelectAllText().MustInput(value)
+			log.Printf("🔍 查找输入框: %s", selector)
+			elem, err := page.Element(selector)
+			if err != nil {
+				return nil, fmt.Errorf("找不到输入元素 '%s': %v", selector, err)
+			}
+			if err := elem.SelectAllText(); err != nil {
+				log.Printf("⚠️ SelectAllText 失败（可能是空输入框）: %v", err)
+			}
+			if err := elem.Input(value); err != nil {
+				return nil, fmt.Errorf("输入失败: %v", err)
+			}
 		case "wait":
 			if step.WaitTime > 0 {
 				time.Sleep(time.Duration(step.WaitTime) * time.Millisecond)
 			}
 			if step.WaitForVisible != "" {
-				page.MustElement(step.WaitForVisible).MustWaitVisible()
+				log.Printf("🔍 等待元素可见: %s", step.WaitForVisible)
+				elem, err := page.Element(step.WaitForVisible)
+				if err != nil {
+					return nil, fmt.Errorf("等待元素失败 '%s': %v", step.WaitForVisible, err)
+				}
+				if err := elem.WaitVisible(); err != nil {
+					return nil, fmt.Errorf("元素未变为可见: %v", err)
+				}
 			}
 		case "captcha":
 			if step.ImageSelector == "" || step.InputSelector == "" {
@@ -1457,7 +1485,16 @@ func executeTrace(browser *rod.Browser, trace *TraceFile, params map[string]stri
 				return nil, fmt.Errorf("验证码处理失败: %v", err)
 			}
 			// 输入验证码
-			page.MustElement(step.InputSelector).MustSelectAllText().MustInput(captchaText)
+			elem, err := page.Element(step.InputSelector)
+			if err != nil {
+				return nil, fmt.Errorf("找不到验证码输入框 '%s': %v", step.InputSelector, err)
+			}
+			if err := elem.SelectAllText(); err != nil {
+				log.Printf("⚠️ SelectAllText 失败: %v", err)
+			}
+			if err := elem.Input(captchaText); err != nil {
+				return nil, fmt.Errorf("输入验证码失败: %v", err)
+			}
 			log.Printf("✅ 验证码已输入")
 		case "extract":
 			if step.Type == "list" {
@@ -1473,8 +1510,15 @@ func executeTrace(browser *rod.Browser, trace *TraceFile, params map[string]stri
 }
 
 func handleCaptcha(page *rod.Page, imageSelector string, solver *CaptchaSolver) (string, error) {
-	imgElem := page.MustElement(imageSelector)
-	imgBytes := imgElem.MustScreenshot()
+	log.Printf("🔍 查找验证码图片: %s", imageSelector)
+	imgElem, err := page.Element(imageSelector)
+	if err != nil {
+		return "", fmt.Errorf("找不到验证码图片元素 '%s': %v", imageSelector, err)
+	}
+	imgBytes, err := imgElem.Screenshot(proto.PageCaptureScreenshotFormatPng, 0)
+	if err != nil {
+		return "", fmt.Errorf("截图失败: %v", err)
+	}
 
 	timestamp := time.Now().Format("20060102_150405")
 	captchaPath := filepath.Join(dataDir, fmt.Sprintf("captcha_%s.png", timestamp))

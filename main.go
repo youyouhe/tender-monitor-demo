@@ -1097,17 +1097,25 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 				}
 			}
 
-			// 检查下一步是否是同一元素的change事件
-			// 如果是，则跳过click（change会被转为input）
+			// 检查后续是否有同一元素的change事件
+			// 如果有，则跳过click（change会被转为input）
+			// 需要跳过中间被过滤的步骤（keyDown/keyUp等）
 			skipClick := false
-			if i < len(chromeSteps)-1 {
-				nextStep := chromeSteps[i+1]
-				if nextStep.Type == "change" {
-					nextSelector := extractBestSelector(nextStep.Selectors)
+			for j := i + 1; j < len(chromeSteps); j++ {
+				futureStep := chromeSteps[j]
+				// 跳过会被过滤的步骤
+				if shouldSkipStep(futureStep.Type) {
+					continue
+				}
+				// 找到下一个有效步骤
+				if futureStep.Type == "change" {
+					nextSelector := extractBestSelector(futureStep.Selectors)
 					if nextSelector == selector {
 						skipClick = true
 					}
 				}
+				// 只检查紧接着的有效步骤
+				break
 			}
 
 			if !skipClick {

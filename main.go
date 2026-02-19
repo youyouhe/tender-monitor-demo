@@ -1337,10 +1337,22 @@ func extractBestSelector(selectors [][]string) string {
 			}
 		}
 
-		// 标准 CSS 选择器
+		// 标准 CSS 选择器（也要排除包含动态ID的）
 		if priority < 2 {
-			selectedSelector = sel
-			priority = 2
+			// 检查是否包含动态 ID
+			containsDynamicId := false
+			dynamicPrefixes := []string{"el-id-", "mui-", "rc-", "headlessui-"}
+			for _, prefix := range dynamicPrefixes {
+				if strings.Contains(sel, prefix) {
+					containsDynamicId = true
+					break
+				}
+			}
+			// 只使用不包含动态ID的CSS选择器
+			if !containsDynamicId {
+				selectedSelector = sel
+				priority = 2
+			}
 		}
 	}
 

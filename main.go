@@ -1150,13 +1150,15 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 			})
 
 		case "click":
+			// 修正查询按钮选择器（去掉 > span）
+			selector := fixSearchButtonSelector(step.Selector)
 			result = append(result, TraceStep{
 				Action:   "click",
-				Selector: step.Selector,
+				Selector: selector,
 			})
 			// 点击后的等待时间
 			waitTime := 2000 // 默认2秒，足够动画和元素加载
-			if isSearchButton(step.Selector) {
+			if isSearchButton(selector) {
 				waitTime = 3000 // 查询按钮等待3秒
 			}
 			result = append(result, TraceStep{
@@ -1207,6 +1209,11 @@ func convertChromeStepsAdvanced(chromeSteps []ChromeDevToolsStep, traceType stri
 					Action:        "captcha",
 					ImageSelector: imgSelector,
 					InputSelector: step.Selector,
+				})
+				// 验证码输入后添加等待，让页面响应
+				result = append(result, TraceStep{
+					Action:   "wait",
+					WaitTime: 2000, // 2秒
 				})
 			} else {
 				result = append(result, TraceStep{
@@ -1490,6 +1497,30 @@ func isSearchButton(selector string) bool {
 			strings.Contains(selector, "查询"))
 }
 
+// fixSearchButtonSelector 修正查询按钮选择器
+// 如果选择器指向 button > span，改为指向 button 本身
+func fixSearchButtonSelector(selector string) string {
+	if !isSearchButton(selector) {
+		return selector
+	}
+
+	// 如果选择器以 > span 或 > * 结尾，去掉子元素选择器
+	if strings.HasSuffix(selector, "> span") {
+		return strings.TrimSuffix(selector, "> span")
+	}
+	if strings.HasSuffix(selector, " > span") {
+		return strings.TrimSuffix(selector, " > span")
+	}
+	if strings.Contains(selector, " > span:") {
+		// button.class > span:nth-of-type(1) -> button.class
+		if idx := strings.Index(selector, " > span"); idx > 0 {
+			return selector[:idx]
+		}
+	}
+
+	return selector
+}
+
 // isKeywordInputField 判断是否是关键词输入框
 func isKeywordInputField(selector string) bool {
 	keywords := []string{"标题", "关键词", "keyword", "title", "搜索", "search"}
@@ -1560,6 +1591,20 @@ func executeTrace(browser *rod.Browser, trace *TraceFile, params map[string]stri
 			if err != nil {
 				return nil, fmt.Errorf("找不到点击元素 '%s': %v", selector, err)
 			}
+
+			// 等待元素可见和稳定
+			if err := elem.WaitVisible(); err != nil {
+				log.Printf("⚠️ 元素不可见: %v", err)
+			}
+			if err := elem.WaitStable(500 * time.Millisecond); err != nil {
+				log.Printf("⚠️ 元素不稳定: %v", err)
+			}
+
+			// 尝试滚动到元素可见位置
+			if err := elem.ScrollIntoView(); err != nil {
+				log.Printf("⚠️ 滚动失败: %v", err)
+			}
+
 			if err := elem.Click(proto.InputMouseButtonLeft, 1); err != nil {
 				return nil, fmt.Errorf("点击失败: %v", err)
 			}

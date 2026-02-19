@@ -1418,7 +1418,29 @@ func inferListFields(selectors [][]string) struct {
 		urlSelector:   "td:nth-child(1) span",
 	}
 
-	// 从 xpath 中解析列索引
+	// 首先尝试从 CSS 选择器中解析（更可靠）
+	for _, selectorGroup := range selectors {
+		for _, sel := range selectorGroup {
+			// CSS选择器: tr:nth-of-type(1) > td:nth-of-type(3) > span
+			if strings.Contains(sel, "td:nth-of-type(") {
+				// 提取列号
+				if idx := strings.Index(sel, "td:nth-of-type("); idx != -1 {
+					rest := sel[idx+15:] // 跳过 "td:nth-of-type("
+					if end := strings.Index(rest, ")"); end != -1 {
+						var colNum int
+						if _, err := fmt.Sscanf(rest[:end], "%d", &colNum); err == nil {
+							result.titleSelector = fmt.Sprintf("td:nth-child(%d) span", colNum)
+							result.urlSelector = fmt.Sprintf("td:nth-child(%d) span", colNum)
+							log.Printf("🔍 从CSS解析列字段: col=%d, selector=%s", colNum, sel)
+							return result
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 回退：从 xpath 中解析列索引
 	for _, selectorGroup := range selectors {
 		for _, sel := range selectorGroup {
 			if strings.HasPrefix(sel, "xpath") && strings.Contains(sel, "/td[") {
@@ -1430,6 +1452,8 @@ func inferListFields(selectors [][]string) struct {
 						if _, err := fmt.Sscanf(rest[:end], "%d", &colNum); err == nil {
 							result.titleSelector = fmt.Sprintf("td:nth-child(%d) span", colNum)
 							result.urlSelector = fmt.Sprintf("td:nth-child(%d) span", colNum)
+							log.Printf("🔍 从XPath解析列字段: col=%d, xpath=%s", colNum, sel)
+							return result
 						}
 					}
 				}
@@ -1437,6 +1461,7 @@ func inferListFields(selectors [][]string) struct {
 		}
 	}
 
+	log.Printf("⚠️ 列字段解析失败，使用默认值")
 	return result
 }
 

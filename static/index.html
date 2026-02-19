@@ -308,6 +308,7 @@
         let sources = [];
         let tags = [];
         let tenders = [];
+        let traces = [];  // 添加轨迹列表缓存
         let currentPage = 1;
         let currentPageSize = 20;
         let totalPages = 1;
@@ -567,12 +568,47 @@
         async function loadSourcesForFilter() {
             const category = document.getElementById('filterCategory').value;
             try {
-                const res = await fetch('/api/sources');
-                const data = await res.json();
-                if(data.success) {
-                    const filtered = category ? data.data.filter(s => s.category === category) : data.data;
-                    document.getElementById('filterSource').innerHTML = '<option value="">全部源头</option>' + 
-                        filtered.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+                // 同时加载sources和traces
+                const [sourcesRes, tracesRes] = await Promise.all([
+                    fetch('/api/sources'),
+                    fetch('/api/traces')
+                ]);
+
+                const sourcesData = await sourcesRes.json();
+                const tracesData = await tracesRes.json();
+
+                if(sourcesData.success) {
+                    sources = sourcesData.data;
+                    traces = tracesData.success ? tracesData.data : [];
+
+                    // 创建轨迹配置映射：source_id -> { hasListTrace, hasDetailTrace }
+                    const traceMap = {};
+                    traces.forEach(t => {
+                        if(!traceMap[t.source_id]) {
+                            traceMap[t.source_id] = { hasListTrace: false, hasDetailTrace: false };
+                        }
+                        if(t.type === 'list' && t.status === 'active') {
+                            traceMap[t.source_id].hasListTrace = true;
+                        }
+                        if(t.type === 'detail' && t.status === 'active') {
+                            traceMap[t.source_id].hasDetailTrace = true;
+                        }
+                    });
+
+                    const filtered = category ? sources.filter(s => s.category === category) : sources;
+
+                    // 在选项中标识轨迹配置状态
+                    document.getElementById('filterSource').innerHTML = '<option value="">全部源头</option>' +
+                        filtered.map(s => {
+                            const config = traceMap[s.id];
+                            let indicator = '';
+                            if(config && config.hasListTrace) {
+                                indicator = ' ✓';  // 已配置列表轨迹
+                            } else {
+                                indicator = ' ⚠️';  // 未配置轨迹
+                            }
+                            return `<option value="${s.id}" data-has-trace="${config && config.hasListTrace ? 'true' : 'false'}">${s.name}${indicator}</option>`;
+                        }).join('');
                 }
             } catch(e) { console.error(e); }
         }
@@ -712,7 +748,8 @@
         }
 
         async function startCollect() {
-            const sourceId = document.getElementById('filterSource').value;
+            const sourceSelect = document.getElementById('filterSource');
+            const sourceId = sourceSelect.value;
             const sourceID = sourceId ? parseInt(sourceId) : 0;
 
             // 从输入框读取关键词
@@ -737,6 +774,28 @@
                 return;
             }
 
+            // 检查所选采集源是否配置了轨迹
+            const selectedOption = sourceSelect.options[sourceSelect.selectedIndex];
+            const hasTrace = selectedOption.getAttribute('data-has-trace') === 'true';
+            const sourceName = selectedOption.text.replace(' ⚠️', '').replace(' ✓', '');
+
+            if(!hasTrace) {
+                const confirmed = confirm(
+                    `采集源"${sourceName}"尚未配置采集轨迹，无法启动采集任务。\n\n` +
+                    `请在"轨迹管理"标签页中上传该采集源的轨迹文件（list类型）。\n\n` +
+                    `是否现在前往轨迹管理页面？`
+                );
+                if(confirmed) {
+                    // 切换到轨迹管理标签页
+                    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+                    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+                    document.querySelector('.nav-tab[data-panel="traces"]').classList.add('active');
+                    document.getElementById('traces-panel').classList.add('active');
+                    loadTraces();
+                }
+                return;
+            }
+
             try {
                 const res = await fetch('/api/collect', {
                     method: 'POST',
@@ -746,8 +805,18 @@
                 const data = await res.json();
                 if(data.success) {
                     showToast(`采集任务已启动 (关键词: ${keywords.join(', ')})`, 'success');
+                    // 切换到任务列表标签页查看进度
+                    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+                    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+                    document.querySelector('.nav-tab[data-panel="tasks"]').classList.add('active');
+                    document.getElementById('tasks-panel').classList.add('active');
+                    loadCollectTasks();
+                } else {
+                    showToast(data.error || '启动失败', 'error');
                 }
-            } catch(e) { showToast('启动失败', 'error'); }
+            } catch(e) {
+                showToast('启动失败: ' + e.message, 'error');
+            }
         }
 
         function closeModal(id) { document.getElementById(id).classList.remove('active'); }
@@ -942,7 +1011,7 @@
         }
 
         // 初始化
-        window.onload = () => { loadTags(); loadSources(); loadTenders(); };
+        window.onload = () => { loadTags(); loadSources(); loadSourcesForFilter(); loadTenders(); };
     </script>
 </body>
 </html>

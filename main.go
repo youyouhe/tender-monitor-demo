@@ -1253,7 +1253,8 @@ func extractBestSelector(selectors [][]string) string {
 	}
 
 	var selectedSelector string
-	var priority int // 优先级：3=ID, 2=CSS, 1=XPath, 0=其他
+	var fallbackSelector string // 降级选择器（即使是动态的）
+	var priority int             // 优先级：3=ID, 2=CSS, 1=XPath, 0=其他
 
 	for _, selectorGroup := range selectors {
 		if len(selectorGroup) == 0 {
@@ -1271,20 +1272,47 @@ func extractBestSelector(selectors [][]string) string {
 			sel = strings.TrimPrefix(sel, "pierce/")
 		}
 
-		// XPath 选择器
+		// 保存第一个可用选择器作为降级选项
+		if fallbackSelector == "" {
+			fallbackSelector = sel
+		}
+
+		// XPath 选择器（需排除基于动态 ID 的 XPath）
 		if strings.HasPrefix(sel, "xpath") {
-			if priority < 1 {
+			// 检查 XPath 中是否包含动态 ID
+			isDynamic := false
+			dynamicPrefixes := []string{"el-id-", "mui-", "rc-", "headlessui-"}
+			for _, prefix := range dynamicPrefixes {
+				if strings.Contains(sel, prefix) {
+					isDynamic = true
+					break
+				}
+			}
+			// 只使用稳定的 XPath
+			if !isDynamic && priority < 1 {
 				selectedSelector = sel
 				priority = 1
 			}
 			continue
 		}
 
-		// ID 选择器（最高优先级）
+		// ID 选择器（需排除动态生成的 ID）
 		if strings.Contains(sel, "#") && !strings.Contains(sel, "xpath") {
-			selectedSelector = sel
-			priority = 3
-			break
+			// 检查是否是动态生成的 ID（Element UI、Material UI、React 等）
+			isDynamic := false
+			dynamicPrefixes := []string{"el-id-", "mui-", "rc-", "headlessui-"}
+			for _, prefix := range dynamicPrefixes {
+				if strings.Contains(sel, prefix) {
+					isDynamic = true
+					break
+				}
+			}
+			// 只有稳定的 ID 才使用最高优先级
+			if !isDynamic {
+				selectedSelector = sel
+				priority = 3
+				break
+			}
 		}
 
 		// 标准 CSS 选择器
@@ -1292,6 +1320,12 @@ func extractBestSelector(selectors [][]string) string {
 			selectedSelector = sel
 			priority = 2
 		}
+	}
+
+	// 如果没有找到稳定的选择器，使用降级选择器
+	if selectedSelector == "" && fallbackSelector != "" {
+		log.Printf("⚠️ 未找到稳定选择器，使用降级选择器: %s (可能包含动态ID，需手动验证)", fallbackSelector)
+		return fallbackSelector
 	}
 
 	return selectedSelector
